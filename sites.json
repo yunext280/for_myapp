@@ -1,0 +1,16 @@
+[
+  {
+    "id": "aviso",
+    "name": "موقع Aviso",
+    "url": "https://aviso.bz",
+    "script_url": "",
+    "members_url": "https://aviso.bz/members" 
+  },
+  {
+    "id": "seotime",
+    "name": "موقع SEOtime",
+    "url": "https://seotime.biz",
+    "script_url": "",
+    "members_url": "https://seotime.biz/user/cabinet"
+  }
+]
