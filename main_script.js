@@ -115,6 +115,16 @@
             let startBtn = document.getElementById(startBtnId);
 
             if (startBtn) {
+                // aviso يضع معالج النقر على الرابط الداخلي <a class="start-surfing-btn">
+                // وليس على الحاوية <div id="start-serf-*">، فالنقر على الحاوية لا يفتح المهمة.
+                let clickable = startBtn.querySelector('a.start-surfing-btn');
+                if (!clickable) {
+                    // مهمة غير متاحة (Заявка не найдена) — تجاوزها بدل التعليق في CONFIRMING
+                    botState.currentIndex++;
+                    this.runAuto();
+                    return;
+                }
+
                 let serfIdElem = document.getElementById(serId.replace('serf-link-', 'serf-id-'));
                 let sek = 10;
                 if (serfIdElem) {
@@ -131,7 +141,7 @@
                 botState.sek = sek;
 
                 // النقر الحقيقي المتقدم عبر simulateClick
-                this.simulateClick(startBtn);
+                this.simulateClick(clickable);
             } else {
                 botState.currentIndex++;
                 this.runAuto();
