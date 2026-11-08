@@ -1,11 +1,10 @@
-
 [
   {
     "id": "aviso",
     "name": "موقع aviso",
     "url": "https://aviso.bz",
-    "members_url": "https://aviso.bz/members" 
-    "main_script_url": "https://raw.githubusercontent.com/yunext280/for_myapp/refs/heads/main/main_script.js",     // سكربت الصفحة الرئيسية (يبحث عن المهام ويضغط عليها)
-    "task_script_url": "https://raw.githubusercontent.com/yunext280/for_myapp/refs/heads/main/task_script.js"     // سكربت التبويبة الجديدة (يتفاعل مع الأزرار وإدخال النصوص)
+    "members_url": "https://aviso.bz/members",
+    "main_script_url": "https://raw.githubusercontent.com/yunext280/for_myapp/refs/heads/main/main_script.js",     
+    "task_script_url": "https://raw.githubusercontent.com/yunext280/for_myapp/refs/heads/main/task_script.js"    
   }
 ]
