@@ -1,16 +1,11 @@
+
 [
   {
     "id": "aviso",
-    "name": "موقع Aviso",
+    "name": "موقع aviso",
     "url": "https://aviso.bz",
-    "script_url": "",
     "members_url": "https://aviso.bz/members" 
-  },
-  {
-    "id": "seotime",
-    "name": "موقع SEOtime",
-    "url": "https://seotime.biz",
-    "script_url": "",
-    "members_url": "https://seotime.biz/user/cabinet"
+    "main_script_url": "https://myserver.com/socpublic/main.js",     // سكربت الصفحة الرئيسية (يبحث عن المهام ويضغط عليها)
+    "task_script_url": "https://myserver.com/socpublic/task.js"     // سكربت التبويبة الجديدة (يتفاعل مع الأزرار وإدخال النصوص)
   }
 ]
