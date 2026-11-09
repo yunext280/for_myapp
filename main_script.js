@@ -154,7 +154,7 @@
             let allTube = document.querySelectorAll('.work-serf');
             if (!allTube || allTube.length === 0) {
                 console.log("لا توجد فيديوهات يوتيوب حالياً، إعادة المحاولة...");
-                setTimeout(() => this.runAuto(), 4000);
+                //setTimeout(() => this.runAuto(), 4000);
                 return;
             }
 
