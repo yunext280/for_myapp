@@ -89,7 +89,7 @@
             let ads = document.querySelectorAll('.work-serf');
             if (!ads || ads.length === 0) {
                 console.log("لا توجد مهام تصفح حالياً، إعادة المحاولة قريباً...");
-                this.handleEmpty("https://aviso.bz/tasks-youtube", "التصفح");
+                window.location.href = "https://aviso.bz/tasks-youtube";
                 //setTimeout(() => this.runAuto(), 4000);
                 return;
             }
