@@ -197,14 +197,18 @@
             return el ? this.clampSek(el.textContent, 0) : 0;
         },
 
-        /** Remaining seconds reported by the Aviso tab title, or null. */
-        titleSeconds: function (title, sek) {
+        /**
+         * Remaining seconds reported by the Aviso tab title ("20 сек"), or null.
+         * 0 means the site asks to confirm the view. Matching the "сек" suffix is
+         * what makes this safe: plain digits appear in other titles too.
+         */
+        titleSeconds: function (title) {
             if (!title) return null;
             if (title.indexOf('Подтвердить просмотр') !== -1) return 0;
-            var m = title.match(/(\d+)/);
+            var m = String(title).match(/(\d+)\s*(?:сек|sec)/i);
             if (!m) return null;
             var n = parseInt(m[1], 10);
-            return (n >= 0 && n <= sek + 5) ? n : null;
+            return (n >= 0 && n <= 300) ? n : null;
         },
 
         // ------------------------------------------------------------ captcha
@@ -383,15 +387,23 @@
             var started = Date.now();
             var sawTimer = false;
             var left = sek;
+            var lastTitle = document.title;
+            var titleChangedAt = Date.now();
             while (this.running) {
                 if (this.paused) { await this.sleep(500); continue; }
                 if (this.captchaElement()) {
                     await this.handleCaptchaIfAny();
                     continue;
                 }
+                if (document.title !== lastTitle) {
+                    lastTitle = document.title;
+                    titleChangedAt = Date.now();
+                }
                 var rowLeft = this.rowSeconds(taskId, kind);
                 if (rowLeft > 0) sawTimer = true;
-                var t = this.titleSeconds(document.title, sek);
+                // The title still belongs to the previous task for a moment.
+                var t = (Date.now() - started > 2500) ? this.titleSeconds(document.title, sek) : null;
+                if (t === 0 && !sawTimer) t = null; // stale "Подтвердить просмотр"
                 var elapsedLeft = Math.max(0, Math.ceil((sek * 1000 - (Date.now() - started)) / 1000));
                 if (t === 0) { left = 0; sawTimer = true; }
                 else if (t !== null) { left = t; sawTimer = true; }
@@ -399,13 +411,17 @@
                 else { left = elapsedLeft; }
                 this.showCountdown('⏳ ' + left + ' ثانية');
                 if (sawTimer && left <= 0) break;
-                // The task tab closed itself: the task is over even if the title
-                // never reported a countdown.
+                // Task tab gone and the title stopped moving: the task is over
+                // (a YouTube intermediate tab may hand the video to a child tab,
+                // so this must not fire while the title is still counting).
                 var b = this.bridge();
                 if (b && typeof b.getTaskTabCount === 'function' &&
-                    b.getTaskTabCount() === 0 && Date.now() - started > 3000) break;
+                    b.getTaskTabCount() === 0 &&
+                    Date.now() - titleChangedAt > 15000) break;
                 // No countdown ever appeared: don't hang forever.
                 if (!sawTimer && Date.now() - started > (sek + 25) * 1000) break;
+                // Absolute safety net (frozen title + frozen timer).
+                if (Date.now() - started > (sek + 180) * 1000) break;
                 await this.sleep(500);
             }
             this.hideCountdown();
@@ -424,7 +440,13 @@
             if (btn) {
                 this.simulateClick(btn);
                 this.notify('✅ تم تأكيد المهمة', '#2ed573');
-                await this.sleep(1500);
+                // Wait for aviso to clear its "Подтвердить просмотр" title, so the
+                // next task does not start with a stale countdown.
+                for (var i = 0; i < 16; i++) {
+                    if (document.title.indexOf('Подтвердить просмотр') === -1) break;
+                    await this.sleep(500);
+                }
+                await this.sleep(800);
             } else {
                 this.notify('⚠️ زر التأكيد غير متوفر — متابعة', '#ffa502');
             }
