@@ -1,248 +1,587 @@
-(function() {
-    // حالة البوت في الذاكرة الحية للسكريبت فقط (In-Memory State) بدون localStorage
-    let botState = {
-        taskId: null,
-        step: 'IDLE', // الحالة تبدأ كـ خمول IDLE
-        sek: 10,
-        currentIndex: 0 // مؤشر التتبع التسلسلي j
-    };
+/**
+ * Aviso main automation script.
+ *
+ * Runs in the site tab (the "parent" tab). The app injects it and calls
+ * `window.BotEngine.runAuto()` (the Kotlin side knows only that generic name).
+ *
+ * Design rules:
+ *  - Seconds are never hardcoded: they are read from the task row (see readSek).
+ *  - The countdown is driven by the Aviso tab title, with a timer fallback.
+ *  - Every task opens a real popup tab; the app adopts it and injects
+ *    task_script.js there with `window.__BOT_TASK__` = {kind, sek, taskId}.
+ *  - If no tab opens, the task is skipped and hidden (same as aviso_bot.py's
+ *    'rmove true' path).
+ *  - Captcha: solved through ru2.sctg.xyz with the key stored in the app
+ *    (AndroidBridge.getCaptchaKey()); manual fallback when it fails.
+ */
+(function () {
+    'use strict';
 
-    window.AvisoMainEngine = {
-        
-        sleep: function(ms) {
-            return new Promise(resolve => setTimeout(resolve, ms));
+    var SURF_URL = 'https://aviso.bz/tasks-surf';
+    var YT_URL = 'https://aviso.bz/tasks-youtube';
+    var STATE_KEY = '__bot_state_aviso';
+    var OVERLAY_ID = '__bot_overlay';
+    var NOTICE_ID = '__bot_notice';
+
+    function loadState() {
+        var def = { step: 'IDLE', taskId: null, kind: '', sek: 0, done: {} };
+        try {
+            var raw = sessionStorage.getItem(STATE_KEY);
+            if (!raw) return def;
+            var s = JSON.parse(raw);
+            if (!s || typeof s !== 'object') return def;
+            return {
+                step: s.step || 'IDLE',
+                taskId: s.taskId || null,
+                kind: s.kind || '',
+                sek: s.sek || 0,
+                done: (s.done && typeof s.done === 'object') ? s.done : {}
+            };
+        } catch (e) {
+            return def;
+        }
+    }
+
+    var state = loadState();
+
+    var engine = {
+
+        running: true,
+        busy: false,
+        paused: false,
+        emptyCount: 0,
+
+        // ------------------------------------------------------------------ utils
+
+        sleep: function (ms) {
+            return new Promise(function (r) { setTimeout(r, ms); });
         },
 
-        // دالة محاكاة النقر الحقيقي (سلسلة المؤشر والفأرة)
-        simulateClick: function(control) {
+        bridge: function () {
+            try { return window.AndroidBridge || null; } catch (e) { return null; }
+        },
+
+        save: function () {
+            try { sessionStorage.setItem(STATE_KEY, JSON.stringify(state)); } catch (e) {}
+        },
+
+        stop: function () {
+            this.running = false;
+            this.hideCountdown();
+        },
+
+        /** Real-looking click: pointer + mouse events, then the native click(). */
+        simulateClick: function (control) {
             if (!control) return false;
             try {
                 control.scrollIntoView({ behavior: 'auto', block: 'center' });
-
-                const r = control.getBoundingClientRect();
-                const x = Math.round(r.left + r.width / 2);
-                const y = Math.round(r.top + r.height / 2);
-                const opts = {
+                var r = control.getBoundingClientRect();
+                var x = Math.round(r.left + r.width / 2);
+                var y = Math.round(r.top + r.height / 2);
+                var opts = {
                     bubbles: true, cancelable: true, view: window, detail: 1,
                     clientX: x, clientY: y, screenX: x, screenY: y,
                     button: 0, ctrlKey: false, altKey: false, shiftKey: false, metaKey: false
                 };
-
-                // سلسلة أحداث الفأرة والمؤشر
-                ['pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(type => {
-                    const Ctor = type.startsWith('pointer') && window.PointerEvent ? PointerEvent : MouseEvent;
+                ['pointerdown', 'mousedown', 'pointerup', 'mouseup'].forEach(function (type) {
+                    var Ctor = (type.indexOf('pointer') === 0 && window.PointerEvent) ? PointerEvent : MouseEvent;
                     control.dispatchEvent(new Ctor(type, opts));
                 });
-
-                // نقرة أصلية أخيرة لتفعيل الحدث الأصلي
                 control.click();
                 return true;
             } catch (e) {
-                console.error('خطأ أثناء النقر:', e);
+                console.error('[Bot] click failed:', e);
                 return false;
             }
         },
 
-        // فحص تسجيل الدخول والتوجيه
-        checkAuthAndRun: function() {
-            const url_login = "https://aviso.bz/login";
-            const member_url = "https://aviso.bz/members";
-            const currentUrl = window.location.href;
+        notify: function (message, color) {
+            var old = document.getElementById(NOTICE_ID);
+            if (old) old.remove();
+            var el = document.createElement('div');
+            el.id = NOTICE_ID;
+            el.textContent = message;
+            el.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483647;' +
+                'background:' + (color || '#1976D2') + ';color:#fff;padding:12px 18px;' +
+                'border-radius:8px;font:bold 14px/1.4 sans-serif;max-width:70vw;' +
+                'box-shadow:0 4px 14px rgba(0,0,0,.35);pointer-events:none;';
+            document.body.appendChild(el);
+            setTimeout(function () { if (el.parentNode) el.remove(); }, 4000);
+        },
 
-            if (currentUrl.includes(url_login)) {
-                setTimeout(() => {
-                    console.log("[Aviso Auth] المستخدم لم يقم بتسجيل الدخول.");
-                    this.showPersistentNotification("⚠️ يجب عليك تسجيل الدخول أولاً!", "#ff4757");
-                }, 1000);
-                return false;
-            } 
+        // Kept for backward compatibility with older callers.
+        showPersistentNotification: function (message, color) {
+            this.notify(message, color);
+        },
+
+        showCountdown: function (text) {
+            var el = document.getElementById(OVERLAY_ID);
+            if (!el) {
+                el = document.createElement('div');
+                el.id = OVERLAY_ID;
+                document.body.appendChild(el);
+            }
+            el.textContent = text;
+            el.style.cssText = 'position:fixed;left:12px;bottom:12px;z-index:2147483647;' +
+                'background:rgba(0,0,0,.86);color:#fff;padding:10px 16px;border-radius:10px;' +
+                'font:bold 18px/1.4 sans-serif;box-shadow:0 4px 12px rgba(0,0,0,.45);' +
+                'pointer-events:none;';
+        },
+
+        hideCountdown: function () {
+            var el = document.getElementById(OVERLAY_ID);
+            if (el) el.remove();
+        },
+
+        /** The hCaptcha widget, only when it is actually visible (not a hidden template). */
+        captchaElement: function () {
+            var list = document.querySelectorAll('.h-captcha, #h-captcha');
+            for (var i = 0; i < list.length; i++) {
+                var r = list[i].getBoundingClientRect();
+                if (r.width > 0 && r.height > 0) return list[i];
+            }
+            return null;
+        },
+
+        // ------------------------------------------------------------- seconds
+
+        /** Task duration in seconds, read from the task row (never hardcoded). */
+        readSek: function (taskId, kind) {
+            var el = null;
+            if (kind === 'youtube') {
+                var yid = taskId.replace('ads-link-', 'ads_id_');
+                el = document.querySelector('#' + yid + ' > span > b:nth-of-type(2)') ||
+                    document.querySelector('#' + yid + ' span b:nth-of-type(2)') ||
+                    document.getElementById(yid);
+            } else {
+                var sid = taskId.replace('serf-link-', 'serf-id-');
+                el = document.querySelector('#' + sid + ' > div > b:nth-of-type(2)') ||
+                    document.querySelector('#' + sid + ' div b:nth-of-type(2)') ||
+                    document.getElementById(sid);
+            }
+            var m = el ? String(el.textContent || '').match(/\d+/) : null;
+            var n = m ? parseInt(m[0], 10) : 0;
+            return (n >= 3 && n <= 300) ? n : (kind === 'youtube' ? 20 : 15);
+        },
+
+        /** Remaining seconds reported by the Aviso tab title, or null. */
+        titleSeconds: function (title, sek) {
+            if (!title) return null;
+            if (title.indexOf('Подтвердить просмотр') !== -1) return 0;
+            var m = title.match(/(\d+)/);
+            if (!m) return null;
+            var n = parseInt(m[1], 10);
+            return (n >= 0 && n <= sek + 5) ? n : null;
+        },
+
+        // ------------------------------------------------------------ captcha
+
+        getCaptchaKey: function () {
+            var b = this.bridge();
+            if (!b || typeof b.getCaptchaKey !== 'function') return '';
+            try { return b.getCaptchaKey() || ''; } catch (e) { return ''; }
+        },
+
+        solveCaptcha: async function (sitekey, pageUrl) {
+            var key = this.getCaptchaKey();
+            if (!key || !sitekey) return null;
+            var base = 'https://ru2.sctg.xyz';
+            for (var attempt = 0; attempt < 3; attempt++) {
+                try {
+                    var r = await fetch(base + '/in.php?key=' + encodeURIComponent(key) +
+                        '&method=hcaptcha&pageurl=' + encodeURIComponent(pageUrl) +
+                        '&sitekey=' + encodeURIComponent(sitekey));
+                    var txt = (await r.text()).trim();
+                    if (txt.indexOf('|') === -1) continue;
+                    var taskId = txt.split('|')[1];
+                    var started = Date.now();
+                    while (Date.now() - started < 300000) {
+                        await this.sleep(5000);
+                        var p = await fetch(base + '/res.php?key=' + encodeURIComponent(key) +
+                            '&id=' + encodeURIComponent(taskId) + '&action=get');
+                        var res = (await p.text()).trim();
+                        if (res.indexOf('OK|') === 0) return res.split('|')[1];
+                        if (res.indexOf('NOT_READY') === -1 && res.indexOf('PROCESSING') === -1) break;
+                    }
+                } catch (e) {
+                    console.warn('[Bot] captcha request failed:', e);
+                }
+            }
+            return null;
+        },
+
+        injectCaptchaToken: function (token) {
+            var ta = document.querySelector('textarea[name="h-captcha-response"]');
+            if (ta) {
+                ta.style.display = 'block';
+                ta.value = token;
+                ta.dispatchEvent(new Event('input', { bubbles: true }));
+                ta.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            var g = document.querySelector('textarea[name="g-recaptcha-response"]');
+            if (g) {
+                g.value = token;
+                g.dispatchEvent(new Event('input', { bubbles: true }));
+                g.dispatchEvent(new Event('change', { bubbles: true }));
+            }
+            var el = document.querySelector('.h-captcha, #h-captcha');
+            var cb = el ? el.getAttribute('data-callback') : null;
+            if (cb && typeof window[cb] === 'function') {
+                window[cb](token);
+                return;
+            }
+            var captchaId = null;
+            var scripts = document.getElementsByTagName('script');
+            for (var i = 0; i < scripts.length; i++) {
+                var m = scripts[i].textContent.match(/let\s+captchaId\s*=\s*['"]([a-fA-F0-9]{32})['"]/);
+                if (m) { captchaId = m[1]; break; }
+            }
+            if (captchaId) {
+                fetch('/ajax/captcha.php', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
+                    body: JSON.stringify({ token: token, captcha_id: captchaId })
+                }).catch(function () {}).then(function () { window.location.reload(); });
+            } else if (ta) {
+                var form = ta.closest('form');
+                if (form) {
+                    var submit = form.querySelector('button[type="submit"], input[type="submit"]');
+                    if (submit) submit.click(); else form.submit();
+                }
+            }
+        },
+
+        /** Returns true when a captcha was present (the page may then reload). */
+        handleCaptchaIfAny: async function () {
+            var el = this.captchaElement();
+            if (!el) return false;
+            this.paused = true;
+            this.showCountdown('🧩 جاري حل الكابتشا…');
+            var token = await this.solveCaptcha(el.getAttribute('data-sitekey'), location.href);
+            if (!token) {
+                this.notify('🧩 تعذّر الحل التلقائي — حلّها يدويًا ثم سيكمل تلقائيًا', '#ff4757');
+                for (var i = 0; i < 600; i++) {
+                    await this.sleep(500);
+                    if (!this.captchaElement()) break;
+                }
+                this.paused = false;
+                this.hideCountdown();
+                return true;
+            }
+            this.notify('✅ تم حل الكابتشا', '#2ed573');
+            this.injectCaptchaToken(token);
+            await this.sleep(2500);
+            this.paused = false;
+            this.hideCountdown();
             return true;
         },
 
-        runAuto: async function() {
-            if (!this.checkAuthAndRun()) return;
+        // ----------------------------------------------------------- task flow
 
-            let url = window.location.href;
+        confirmIdFor: function (taskId) {
+            if (taskId.indexOf('serf-link-') === 0) return taskId.replace('serf-link-', 'serf_btn_confirm_');
+            if (taskId.indexOf('ads-link-') === 0) return taskId.replace('ads-link-', 'ads_btn_confirm_');
+            return taskId;
+        },
 
-            console.log("AvisoMain State:", botState.step, "TaskID:", botState.taskId, "Index j:", botState.currentIndex);
-
-            // إذا كنا قد عدنا من التبويب الفرعي وننتظر التأكيد
-            if (botState.step === 'CONFIRMING' && botState.taskId) {
-                await this.confirmAndFinish(botState.taskId);
-                return;
+        visibleRows: function () {
+            var rows = document.querySelectorAll('.work-serf');
+            var out = [];
+            for (var i = 0; i < rows.length; i++) {
+                var row = rows[i];
+                if (!row.id || state.done[row.id]) continue;
+                if (row.offsetParent === null) continue;
+                out.push(row);
             }
+            return out;
+        },
 
-            // إذا كنا في حالة الخمول (IDLE)، نبدأ بالبحث وتطبيق المؤشر
-            if (botState.step === 'IDLE') {
-                if (url.includes('tasks-surf')) {
-                    this.Surfing();
-                } else if (url.includes('tasks-youtube')) {
-                    this.av_ytub();
-                } else {
-                    window.location.href = "https://aviso.bz/tasks-surf";
-                }
+        /**
+         * Click a start control and verify that a task tab really opened
+         * (aviso_bot.py: `len(driver.window_handles) > 1`).
+         */
+        startTask: async function (taskId, kind, clickable, sek) {
+            var b = this.bridge();
+            if (b && typeof b.setTaskContext === 'function') {
+                try {
+                    b.setTaskContext(kind, JSON.stringify({ kind: kind, sek: sek, taskId: taskId }));
+                } catch (e) {}
+            }
+            var before = (b && typeof b.getTaskTabCount === 'function') ? b.getTaskTabCount() : -1;
+            if (!this.simulateClick(clickable)) return false;
+            if (before < 0) return true; // no bridge (desktop testing): assume it worked
+
+            for (var i = 0; i < 14; i++) { // up to ~7s
+                await this.sleep(500);
+                if (b.getTaskTabCount() > before) return true;
+            }
+            return false;
+        },
+
+        /** Mark a task as unstartable: hide the row and never retry it. */
+        skipTask: function (taskId, reason) {
+            state.done[taskId] = true;
+            this.save();
+            var row = document.getElementById(taskId);
+            if (row) {
+                row.style.opacity = '0.35';
+                row.style.display = 'none';
+            }
+            this.notify('⚠️ تم تخطي المهمة — ' + reason, '#ff4757');
+            var b = this.bridge();
+            if (b && typeof b.clearTaskContext === 'function') {
+                try { b.clearTaskContext(); } catch (e) {}
             }
         },
 
-        // أ. تصفح الإعلانات باستخدام المؤشر j في الذاكرة
-        Surfing: async function() {
-            let ads = document.querySelectorAll('.work-serf');
-            if (!ads || ads.length === 0) {
-                console.log("لا توجد مهام تصفح حالياً، إعادة المحاولة قريباً...");
-                window.location.href = "https://aviso.bz/tasks-youtube";
-                //setTimeout(() => this.runAuto(), 4000);
-                return;
-            }
-
-            let j = botState.currentIndex;
-
-            // إذا وصلنا لنهاية عناصر القائمة الحالية، ننتقل بسلاسة للقسم التالي
-            if (j >= ads.length) {
-                console.log("تم إنجاز كافة المهام الظاهرة في هذه الصفحة. الانتقال لمهام يوتيوب...");
-                botState.currentIndex = 0;
-                window.location.href = "https://aviso.bz/tasks-youtube";
-                return;
-            }
-
-            let ad = ads[j];
-            if (!ad) {
-                botState.currentIndex++;
-                this.runAuto();
-                return;
-            }
-
-            let serId = ad.id;
-            let startBtnId = serId.replace('serf-link-', 'start-serf-');
-            let startBtn = document.getElementById(startBtnId);
-
-            if (startBtn) {
-                // aviso يضع معالج النقر على الرابط الداخلي <a class="start-surfing-btn">
-                // وليس على الحاوية <div id="start-serf-*">، فالنقر على الحاوية لا يفتح المهمة.
-                let clickable = startBtn.querySelector('a.start-surfing-btn');
-                if (!clickable) {
-                    // مهمة غير متاحة (Заявка не найдена) — تجاوزها بدل التعليق في CONFIRMING
-                    botState.currentIndex++;
-                    this.runAuto();
-                    return;
+        /** Countdown while the task tab runs; title first, timer as fallback. */
+        watchCountdown: async function (taskId, kind, sek) {
+            var confirmId = this.confirmIdFor(taskId);
+            var started = Date.now();
+            var left = sek;
+            while (this.running) {
+                if (this.paused) { await this.sleep(500); continue; }
+                if (document.getElementById(confirmId)) break;
+                if (this.captchaElement()) {
+                    await this.handleCaptchaIfAny();
+                    continue;
                 }
+                var t = this.titleSeconds(document.title, sek);
+                var elapsedLeft = Math.max(0, Math.ceil((sek * 1000 - (Date.now() - started)) / 1000));
+                left = (t !== null) ? t : elapsedLeft;
+                this.showCountdown('⏳ ' + left + ' ثانية');
+                if (t === 0) break;
+                if (t === null && Date.now() - started > (sek + 20) * 1000) break;
+                await this.sleep(500);
+            }
+            this.hideCountdown();
+        },
 
-                let serfIdElem = document.getElementById(serId.replace('serf-link-', 'serf-id-'));
-                let sek = 10;
-                if (serfIdElem) {
-                    let bTags = serfIdElem.querySelectorAll('b');
-                    if (bTags.length >= 2) {
-                        let match = bTags[1].textContent.match(/\d+/);
-                        if (match) sek = parseInt(match[0]);
-                    }
-                }
-
-                // حفظ بيانات المهمة مؤقتاً في الذاكرة الحية (In-Memory)
-                botState.taskId = serId;
-                botState.step = 'CONFIRMING';
-                botState.sek = sek;
-
-                // النقر الحقيقي المتقدم عبر simulateClick
-                this.simulateClick(clickable);
+        confirmAndFinish: async function (taskId) {
+            var b = this.bridge();
+            // Make sure no leftover task tab (two-page YouTube flow) stays open.
+            if (b && typeof b.closeTaskTab === 'function') {
+                try { b.closeTaskTab(); } catch (e) {}
+            }
+            var confirmId = this.confirmIdFor(taskId);
+            var btn = null;
+            for (var i = 0; i < 40; i++) { // up to 20s
+                btn = document.getElementById(confirmId);
+                if (btn) break;
+                await this.sleep(500);
+            }
+            if (btn) {
+                this.simulateClick(btn);
+                this.notify('✅ تم تأكيد المهمة', '#2ed573');
+                await this.sleep(1200);
             } else {
-                botState.currentIndex++;
-                this.runAuto();
+                this.notify('⚠️ زر التأكيد غير متوفر — متابعة', '#ffa502');
             }
+            state.done[taskId] = true;
+            state.step = 'IDLE';
+            state.taskId = null;
+            state.kind = '';
+            this.save();
         },
 
-        // ب. يوتيوب باستخدام المؤشر j في الذاكرة
-        av_ytub: async function() {
-            let allTube = document.querySelectorAll('.work-serf');
-            if (!allTube || allTube.length === 0) {
-                console.log("لا توجد فيديوهات يوتيوب حالياً، إعادة المحاولة...");
-                this.showPersistentNotification( allTube.length, "#ff4757");
-                //setTimeout(() => this.runAuto(), 4000);
-                return;
+        /** Click a confirm button left over from a previous run (page reload). */
+        confirmPending: async function () {
+            var btns = document.querySelectorAll('[id^="serf_btn_confirm_"], [id^="ads_btn_confirm_"]');
+            for (var i = 0; i < btns.length; i++) {
+                var btn = btns[i];
+                var taskId = btn.id
+                    .replace('serf_btn_confirm_', 'serf-link-')
+                    .replace('ads_btn_confirm_', 'ads-link-');
+                if (state.done[taskId]) continue;
+                this.simulateClick(btn);
+                state.done[taskId] = true;
+                this.save();
+                await this.sleep(1200);
+                return true;
             }
-
-            let j = botState.currentIndex;
-
-            if (j >= allTube.length) {
-                console.log("تم إنجاز كافة فيديوهات يوتيوب. العودة لقسم التصفح...");
-                botState.currentIndex = 0;
-                window.location.href = "https://aviso.bz/tasks-surf";
-                return;
-            }
-
-            let tube = allTube[j];
-            if (!tube) {
-                botState.currentIndex++;
-                this.runAuto();
-                return;
-            }
-
-            let tubId = tube.id;
-            let sekId = tubId.replace('ads-link-', 'ads_id_');
-            let sekElem = document.getElementById(sekId);
-            let sek = 20;
-            if (sekElem) {
-                let match = sekElem.textContent.match(/\d+/);
-                if (match) sek = parseInt(match[0]);
-            }
-
-            let startBtnId = tubId.replace('ads-link-', 'link_ads_start_');
-            let startBtn = document.getElementById(startBtnId);
-
-            if (startBtn) {
-                botState.taskId = tubId;
-                botState.step = 'CONFIRMING';
-                botState.sek = sek;
-
-                this.simulateClick(startBtn);
-            } else {
-                botState.currentIndex++;
-                this.runAuto();
-            }
+            return false;
         },
 
-        // ج. تأكيد المهمة وزيادة المؤشر j++ دون تحديث الصفحة
-        confirmAndFinish: async function(taskId) {
-            console.log("جاري تأكيد المهمة في الصفحة الرئيسية للفهرس j =", botState.currentIndex);
-            
-            await this.sleep(1500);
+        // ------------------------------------------------------------- sections
 
-            let conferId = taskId.replace('serf-link-', 'serf_btn_confirm_')
-                                 .replace('ads-link-', 'ads_btn_confirm_');
-            
-            let confirmBtn = document.getElementById(conferId);
+        Surfing: async function () {
+            var rows = this.visibleRows();
+            if (!rows.length) {
+                this.emptyCount++;
+                if (this.emptyCount >= 2) {
+                    this.emptyCount = 0;
+                    this.notify('↪️ لا مهام تصفح — الانتقال لمهام يوتيوب', '#1976D2');
+                    location.href = YT_URL;
+                    return 'navigate';
+                }
+                return 'wait';
+            }
+            this.emptyCount = 0;
 
-            if (confirmBtn) {
-                this.simulateClick(confirmBtn);
-                console.log("تم النقر على زر التأكيد بنجاح واحتساب الأرباح!");
+            var taskId = rows[0].id;
+            var startBtn = document.getElementById(taskId.replace('serf-link-', 'start-serf-'));
+            var clickable = startBtn ? startBtn.querySelector('a.start-surfing-btn') : null;
+            if (!clickable) {
+                this.skipTask(taskId, 'زر البدء غير متاح');
+                return 'next';
+            }
+
+            var sek = this.readSek(taskId, 'surf');
+            this.notify('▶️ مهمة تصفح ' + taskId + ' — ' + sek + 'ث', '#1976D2');
+            var opened = await this.startTask(taskId, 'surf', clickable, sek);
+            if (!opened) {
+                this.skipTask(taskId, 'لم يُفتح تبويب');
+                return 'next';
+            }
+
+            state.step = 'CONFIRMING';
+            state.taskId = taskId;
+            state.kind = 'surf';
+            state.sek = sek;
+            this.save();
+            return 'started';
+        },
+
+        av_ytub: async function () {
+            var rows = this.visibleRows();
+            if (!rows.length) {
+                this.emptyCount++;
+                if (this.emptyCount >= 2) {
+                    this.emptyCount = 0;
+                    this.notify('↪️ لا مهام يوتيوب — العودة لمهام التصفح', '#1976D2');
+                    location.href = SURF_URL;
+                    return 'navigate';
+                }
+                return 'wait';
+            }
+            this.emptyCount = 0;
+
+            var taskId = rows[0].id;
+            var sek = this.readSek(taskId, 'youtube');
+            var startBtn = document.getElementById(taskId.replace('ads-link-', 'link_ads_start_'));
+            var clickable = startBtn || null;
+
+            if (clickable) {
+                this.notify('▶️ مهمة يوتيوب ' + taskId + ' — ' + sek + 'ث', '#1976D2');
+                var opened = await this.startTask(taskId, 'youtube', clickable, sek);
+                if (opened) {
+                    state.step = 'CONFIRMING';
+                    state.taskId = taskId;
+                    state.kind = 'youtube';
+                    state.sek = sek;
+                    this.save();
+                    return 'started';
+                }
+            }
+
+            // Fallback start link (aviso_bot.py line 381).
+            var alt = document.querySelector('#' + taskId + ' > tbody > tr > td:nth-child(3) > div > a');
+            if (alt) {
+                this.notify('🔁 محاولة رابط بديل للمهمة ' + taskId, '#ffa502');
+                var openedAlt = await this.startTask(taskId, 'youtube', alt, sek);
                 await this.sleep(1500);
-            } else {
-                console.log("تنبيه: زر التأكيد غير متوفر.");
+                if (openedAlt) {
+                    state.step = 'CONFIRMING';
+                    state.taskId = taskId;
+                    state.kind = 'youtube';
+                    state.sek = sek;
+                    this.save();
+                    return 'started';
+                }
             }
 
-            // إعادة ضبط المهمة الحالية وزيادة مؤشر التتبع j الانتقالي فوراً
-            botState.taskId = null;
-            botState.step = 'IDLE';
-            botState.currentIndex++;
-
-            await this.sleep(1000);
-            this.runAuto();
+            // 'rmove true': the task cannot be started -> drop it.
+            this.skipTask(taskId, 'لم يُفتح تبويب');
+            return 'next';
         },
 
-        showPersistentNotification: function(message, bgColor) {
-            const oldNotice = document.getElementById('auth-notice');
-            if (oldNotice) oldNotice.remove();
+        // ----------------------------------------------------------------- loop
 
-            const notice = document.createElement('div');
-            notice.id = 'auth-notice';
-            notice.innerHTML = message;
-            notice.style.cssText = `position:fixed;top:20px;right:20px;background:${bgColor};color:#fff;padding:14px 22px;z-index:99999;border-radius:6px;font-weight:bold;box-shadow:0 4px 6px rgba(0,0,0,0.3);`;
-            document.body.appendChild(notice);
+        checkAuthAndRun: function () {
+            if (location.href.indexOf('/login') !== -1) {
+                var self = this;
+                setTimeout(function () {
+                    self.notify('⚠️ يجب تسجيل الدخول أولاً', '#ff4757');
+                }, 500);
+                return false;
+            }
+            return true;
+        },
+
+        runAuto: async function () {
+            if (this.busy) return;
+            this.busy = true;
+            try {
+                if (!this.checkAuthAndRun()) return;
+                for (var guard = 0; guard < 2000; guard++) {
+                    if (!this.running) return;
+
+                    var url = location.href;
+                    if (url.indexOf('/login') !== -1) { this.checkAuthAndRun(); return; }
+
+                    if (state.step === 'CONFIRMING' && state.taskId) {
+                        var taskId = state.taskId;
+                        var kind = state.kind;
+                        var sek = state.sek || this.readSek(taskId, kind);
+                        await this.watchCountdown(taskId, kind, sek);
+                        await this.confirmAndFinish(taskId);
+                        continue;
+                    }
+
+                    await this.confirmPending();
+
+                    if (await this.handleCaptchaIfAny()) {
+                        await this.sleep(1500);
+                        continue;
+                    }
+
+                    var next;
+                    if (url.indexOf('tasks-surf') !== -1) next = await this.Surfing();
+                    else if (url.indexOf('tasks-youtube') !== -1) next = await this.av_ytub();
+                    else {
+                        this.notify('↪️ الانتقال إلى مهام التصفح', '#1976D2');
+                        location.href = SURF_URL;
+                        return;
+                    }
+
+                    if (next === 'navigate') return;
+                    if (next === 'wait') await this.sleep(4000);
+                }
+            } catch (e) {
+                console.error('[Bot] runAuto crashed:', e);
+            } finally {
+                this.busy = false;
+            }
         }
     };
 
-    window.addEventListener('load', () => {
-        setTimeout(() => {
-            window.AvisoMainEngine.runAuto();
-        }, 1500);
+    // Generic contract for the app + legacy alias for the old Aviso script.
+    window.BotEngine = engine;
+    window.AvisoMainEngine = engine;
+
+    // postMessage fallback: a task tab reports it is done / needs a captcha.
+    window.addEventListener('message', function (ev) {
+        var d = ev && ev.data;
+        if (!d || typeof d !== 'object') return;
+        if (d.type === 'bot:done') {
+            engine.runAuto();
+        } else if (d.type === 'bot:captcha') {
+            engine.paused = true;
+        } else if (d.type === 'bot:resume') {
+            engine.paused = false;
+        }
+    });
+
+    // Hide rows already finished in this session.
+    setTimeout(function () {
+        Object.keys(state.done).forEach(function (id) {
+            var row = document.getElementById(id);
+            if (row) { row.style.opacity = '0.35'; row.style.display = 'none'; }
+        });
+    }, 800);
+
+    window.addEventListener('load', function () {
+        setTimeout(function () { engine.runAuto(); }, 1500);
     });
 
 })();
