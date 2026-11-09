@@ -209,7 +209,7 @@
 
         // ------------------------------------------------------------ handlers
 
-        /** Plain "stay on the page for N seconds, then close". */
+        /** Plain "stay on the page for N seconds, then wait to be closed". */
         watch: async function () {
             var started = Date.now();
             var hardMs = (sek + 120) * 1000;
@@ -219,7 +219,7 @@
                     continue;
                 }
                 var left = Math.max(0, Math.ceil((sek * 1000 - (Date.now() - started)) / 1000));
-                this.show('⏳ ' + left + ' ثانية');
+                this.show(left > 0 ? ('⏳ ' + left + ' ثانية') : '⏳ بانتظار تأكيد المهمة…');
                 this.post('bot:tick', { remaining: left });
                 if (left <= 0) break;
                 await this.sleep(500);
@@ -229,6 +229,16 @@
             var extra = document.querySelector('.btn__notice, #check_timer, .ads-confirm-btn');
             if (extra) {
                 this.simulateClick(extra);
+                await this.sleep(1000);
+            }
+            // `sek` is only a lower bound: the site's main tab owns the real
+            // countdown (it reads the page title) and closes this tab through the
+            // bridge when the task is really finished. Closing ourselves early
+            // made the parent confirm before the view was counted.
+            this.post('bot:done');
+            this.show('⏳ بانتظار إغلاق التبويب…');
+            var t0 = Date.now();
+            while (Date.now() - t0 < 120000) {
                 await this.sleep(1000);
             }
             this.hide();

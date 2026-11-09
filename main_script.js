@@ -317,20 +317,6 @@
             return taskId;
         },
 
-        /**
-         * Aviso ships template rows (id present, hidden inputs still hold
-         * `{REPORT_ID}` / `{HASH_CONFIRM}`). They can never be started: clicking
-         * them does nothing, which looked like "the tab never opened".
-         */
-        isTemplateRow: function (row) {
-            var inputs = row.querySelectorAll('input[id^="ads_report_id_"], input[id^="serf_report_id_"], ' +
-                'input[id^="ads_hash_"], input[id^="serf_hash_"]');
-            for (var i = 0; i < inputs.length; i++) {
-                if (String(inputs[i].value || '').indexOf('{') !== -1) return true;
-            }
-            return false;
-        },
-
         visibleRows: function () {
             var rows = document.querySelectorAll('.work-serf');
             var out = [];
@@ -338,7 +324,6 @@
                 var row = rows[i];
                 if (!row.id || state.done[row.id]) continue;
                 if (row.offsetParent === null) continue;
-                if (this.isTemplateRow(row)) continue;
                 out.push(row);
             }
             return out;
@@ -452,8 +437,18 @@
 
         // ------------------------------------------------------------- sections
 
-        Surfing: async function () {
+        /** Only the rows this section can actually start (other kinds share the page). */
+        rowsOfKind: function (prefix) {
             var rows = this.visibleRows();
+            var out = [];
+            for (var i = 0; i < rows.length; i++) {
+                if (rows[i].id.indexOf(prefix) === 0) out.push(rows[i]);
+            }
+            return out;
+        },
+
+        Surfing: async function () {
+            var rows = this.rowsOfKind('serf-link-');
             if (!rows.length) {
                 this.emptyCount++;
                 if (this.emptyCount >= 2) {
@@ -491,7 +486,7 @@
         },
 
         av_ytub: async function () {
-            var rows = this.visibleRows();
+            var rows = this.rowsOfKind('ads-link-');
             if (!rows.length) {
                 this.emptyCount++;
                 if (this.emptyCount >= 2) {
