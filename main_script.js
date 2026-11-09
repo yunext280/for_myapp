@@ -147,21 +147,54 @@
 
         /** Task duration in seconds, read from the task row (never hardcoded). */
         readSek: function (taskId, kind) {
+            var fallback = (kind === 'youtube') ? 20 : 15;
             var el = null;
+
             if (kind === 'youtube') {
                 var yid = taskId.replace('ads-link-', 'ads_id_');
+                // aviso_bot.py reads `#ads_id_<id> span b[2]`.
                 el = document.querySelector('#' + yid + ' > span > b:nth-of-type(2)') ||
                     document.querySelector('#' + yid + ' span b:nth-of-type(2)') ||
-                    document.getElementById(yid);
+                    document.querySelector('#' + yid + ' b:nth-of-type(2)');
+                var fromRow = this.clampSek(el ? el.textContent : '', 0);
+                if (fromRow) return fromRow;
+                // Fallback: the hidden timer input, but never trust a tiny value
+                // (templates ship value="5").
+                var input = document.getElementById(taskId.replace('ads-link-', 'ads_timer_'));
+                var fromInput = input ? this.clampSek(input.value, 0) : 0;
+                if (fromInput >= 10) return fromInput;
             } else {
+                // The start anchor carries data-timer="20" — the most reliable source.
+                var anchor = document.querySelector(
+                    '#start-serf-' + taskId.replace('serf-link-', '') + ' a.start-surfing-btn'
+                );
+                if (anchor) {
+                    var fromAttr = this.clampSek(anchor.getAttribute('data-timer'), 0);
+                    if (fromAttr) return fromAttr;
+                }
                 var sid = taskId.replace('serf-link-', 'serf-id-');
                 el = document.querySelector('#' + sid + ' > div > b:nth-of-type(2)') ||
                     document.querySelector('#' + sid + ' div b:nth-of-type(2)') ||
-                    document.getElementById(sid);
+                    document.querySelector('#' + sid + ' b:nth-of-type(2)');
             }
-            var m = el ? String(el.textContent || '').match(/\d+/) : null;
+            return this.clampSek(el ? el.textContent : '', fallback);
+        },
+
+        /** Parse a seconds value; [fallback] 0 means "not found". */
+        clampSek: function (text, fallback) {
+            var m = String(text || '').match(/\d+/);
             var n = m ? parseInt(m[0], 10) : 0;
-            return (n >= 3 && n <= 300) ? n : (kind === 'youtube' ? 20 : 15);
+            if (n >= 3 && n <= 300) return n;
+            return fallback || 0;
+        },
+
+        /** Live remaining seconds of this task, from its in-row countdown element. */
+        rowSeconds: function (taskId, kind) {
+            var id = (kind === 'youtube')
+                ? taskId.replace('ads-link-', 'ads_')
+                : taskId.replace('serf-link-', 'serf_');
+            var el = document.getElementById('timer_' + id);
+            return el ? this.clampSek(el.textContent, 0) : 0;
         },
 
         /** Remaining seconds reported by the Aviso tab title, or null. */
@@ -284,6 +317,20 @@
             return taskId;
         },
 
+        /**
+         * Aviso ships template rows (id present, hidden inputs still hold
+         * `{REPORT_ID}` / `{HASH_CONFIRM}`). They can never be started: clicking
+         * them does nothing, which looked like "the tab never opened".
+         */
+        isTemplateRow: function (row) {
+            var inputs = row.querySelectorAll('input[id^="ads_report_id_"], input[id^="serf_report_id_"], ' +
+                'input[id^="ads_hash_"], input[id^="serf_hash_"]');
+            for (var i = 0; i < inputs.length; i++) {
+                if (String(inputs[i].value || '').indexOf('{') !== -1) return true;
+            }
+            return false;
+        },
+
         visibleRows: function () {
             var rows = document.querySelectorAll('.work-serf');
             var out = [];
@@ -291,6 +338,7 @@
                 var row = rows[i];
                 if (!row.id || state.done[row.id]) continue;
                 if (row.offsetParent === null) continue;
+                if (this.isTemplateRow(row)) continue;
                 out.push(row);
             }
             return out;
@@ -311,7 +359,10 @@
             if (!this.simulateClick(clickable)) return false;
             if (before < 0) return true; // no bridge (desktop testing): assume it worked
 
-            for (var i = 0; i < 14; i++) { // up to ~7s
+            // YouTube needs two hops (notice page -> channel page) before the
+            // real tab exists, so wait longer there.
+            var tries = (kind === 'youtube') ? 24 : 14;
+            for (var i = 0; i < tries; i++) {
                 await this.sleep(500);
                 if (b.getTaskTabCount() > before) return true;
             }
@@ -334,27 +385,47 @@
             }
         },
 
-        /** Countdown while the task tab runs; title first, timer as fallback. */
+        /**
+         * Countdown while the task tab runs.
+         *
+         * The confirm button CANNOT be used as a "done" signal: aviso keeps it in
+         * the DOM (visible for surf, display:none for YouTube) even before the task
+         * starts. The real signals are the in-row timer (`#timer_serf_<id>` /
+         * `#timer_ads_<id>`), the tab title ("20 сек" -> "0 сек" ->
+         * "Подтвердить просмотр") and finally the elapsed time.
+         */
         watchCountdown: async function (taskId, kind, sek) {
-            var confirmId = this.confirmIdFor(taskId);
             var started = Date.now();
+            var sawTimer = false;
             var left = sek;
             while (this.running) {
                 if (this.paused) { await this.sleep(500); continue; }
-                if (document.getElementById(confirmId)) break;
                 if (this.captchaElement()) {
                     await this.handleCaptchaIfAny();
                     continue;
                 }
+                var rowLeft = this.rowSeconds(taskId, kind);
+                if (rowLeft > 0) sawTimer = true;
                 var t = this.titleSeconds(document.title, sek);
                 var elapsedLeft = Math.max(0, Math.ceil((sek * 1000 - (Date.now() - started)) / 1000));
-                left = (t !== null) ? t : elapsedLeft;
+                if (t === 0) { left = 0; sawTimer = true; }
+                else if (t !== null) { left = t; sawTimer = true; }
+                else if (rowLeft > 0) { left = rowLeft; }
+                else { left = elapsedLeft; }
                 this.showCountdown('⏳ ' + left + ' ثانية');
-                if (t === 0) break;
-                if (t === null && Date.now() - started > (sek + 20) * 1000) break;
+                if (sawTimer && left <= 0) break;
+                // The task tab closed itself: the task is over even if the title
+                // never reported a countdown.
+                var b = this.bridge();
+                if (b && typeof b.getTaskTabCount === 'function' &&
+                    b.getTaskTabCount() === 0 && Date.now() - started > 3000) break;
+                // No countdown ever appeared: don't hang forever.
+                if (!sawTimer && Date.now() - started > (sek + 25) * 1000) break;
                 await this.sleep(500);
             }
             this.hideCountdown();
+            // Give aviso a moment to register the view before confirming.
+            await this.sleep(1500 + Math.floor(Math.random() * 2000));
         },
 
         confirmAndFinish: async function (taskId) {
@@ -364,16 +435,11 @@
                 try { b.closeTaskTab(); } catch (e) {}
             }
             var confirmId = this.confirmIdFor(taskId);
-            var btn = null;
-            for (var i = 0; i < 40; i++) { // up to 20s
-                btn = document.getElementById(confirmId);
-                if (btn) break;
-                await this.sleep(500);
-            }
+            var btn = document.getElementById(confirmId);
             if (btn) {
                 this.simulateClick(btn);
                 this.notify('✅ تم تأكيد المهمة', '#2ed573');
-                await this.sleep(1200);
+                await this.sleep(1500);
             } else {
                 this.notify('⚠️ زر التأكيد غير متوفر — متابعة', '#ffa502');
             }
@@ -382,24 +448,6 @@
             state.taskId = null;
             state.kind = '';
             this.save();
-        },
-
-        /** Click a confirm button left over from a previous run (page reload). */
-        confirmPending: async function () {
-            var btns = document.querySelectorAll('[id^="serf_btn_confirm_"], [id^="ads_btn_confirm_"]');
-            for (var i = 0; i < btns.length; i++) {
-                var btn = btns[i];
-                var taskId = btn.id
-                    .replace('serf_btn_confirm_', 'serf-link-')
-                    .replace('ads_btn_confirm_', 'ads-link-');
-                if (state.done[taskId]) continue;
-                this.simulateClick(btn);
-                state.done[taskId] = true;
-                this.save();
-                await this.sleep(1200);
-                return true;
-            }
-            return false;
         },
 
         // ------------------------------------------------------------- sections
@@ -527,8 +575,6 @@
                         await this.confirmAndFinish(taskId);
                         continue;
                     }
-
-                    await this.confirmPending();
 
                     if (await this.handleCaptchaIfAny()) {
                         await this.sleep(1500);
