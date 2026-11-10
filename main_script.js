@@ -225,27 +225,43 @@
             return fallback || 0;
         },
 
-        /** Live remaining seconds of this task, from its in-row countdown element. */
+        /**
+         * Live remaining seconds of this task, from its own in-row countdown
+         * element (`#timer_serf_<id>` / `#timer_ads_<id>`).
+         *
+         * This is the authoritative source: the page title may join several
+         * tasks ("10 сек • 19 сек • Подтвердить просмотр"), so it cannot tell
+         * which timer belongs to the current task.
+         *
+         * @returns {number|null} null when the element does not exist at all.
+         */
         rowSeconds: function (taskId, kind) {
             var id = (kind === 'youtube')
                 ? taskId.replace('ads-link-', 'ads_')
                 : taskId.replace('serf-link-', 'serf_');
             var el = document.getElementById('timer_' + id);
-            return el ? this.clampSek(el.textContent, 0) : 0;
+            if (!el) return null;
+            var m = String(el.textContent || '').match(/\d+/);
+            if (!m) return null;
+            var n = parseInt(m[0], 10);
+            return (n >= 0 && n <= 300) ? n : null;
         },
 
         /**
-         * Remaining seconds reported by the Aviso tab title ("20 сек"), or null.
-         * 0 means the site asks to confirm the view. Matching the "сек" suffix is
-         * what makes this safe: plain digits appear in other titles too.
+         * Remaining seconds reported by the Aviso tab title, or null.
+         * The title may join several timers, so only the first numeric segment
+         * is used; the confirm label alone is a fallback for the single-task
+         * case (it may also belong to another task).
          */
         titleSeconds: function (title) {
             if (!title) return null;
-            if (title.indexOf('Подтвердить просмотр') !== -1) return 0;
             var m = String(title).match(/(\d+)\s*(?:сек|sec)/i);
-            if (!m) return null;
-            var n = parseInt(m[1], 10);
-            return (n >= 0 && n <= 300) ? n : null;
+            if (m) {
+                var n = parseInt(m[1], 10);
+                return (n >= 0 && n <= 300) ? n : null;
+            }
+            if (String(title).indexOf('Подтвердить просмотр') !== -1) return 0;
+            return null;
         },
 
         // ------------------------------------------------------------ captcha
@@ -427,16 +443,19 @@
          * they are passed. Confirming on elapsed time there closes a task that
          * never counted.
          *
-         * The tab title is the proof: a real "N сек" must appear at least once
-         * (task_script.js verifies its own URL for the same reason).
+         * The task's own row timer (`#timer_serf_<id>` / `#timer_ads_<id>`) is
+         * the proof: the title may join several tasks ("10 сек • 19 сек •
+         * Подтвердить просмотр"), so a "Подтвердить просмотр" segment there can
+         * belong to another task. The title is only used when the row timer
+         * element does not exist at all.
          *
          * @returns {'counted'|'no-timer'} whether a real countdown was observed.
          */
         watchCountdown: async function (taskId, kind, sek) {
             var started = Date.now();
             var countStart = 0;   // when the countdown was first seen
-            var sawTimer = false; // any countdown (row timer or title)
-            var sawTitle = false; // the Aviso title really counted down
+            var sawRow = false;   // this task's own row timer counted down
+            var sawTitle = false; // the Aviso title counted down (fallback only)
             var left = sek;
             var lastTitle = document.title;
             var titleChangedAt = Date.now();
@@ -456,34 +475,33 @@
                 if (this.paused) { await this.sleep(500); continue; }
                 // The task tab says it never reached a real task page
                 // (e.g. YouTube video never opened) — stop waiting.
-                if (this.stuck && !sawTitle) break;
+                if (this.stuck && !sawRow && !sawTitle) break;
 
                 if (document.title !== lastTitle) {
                     lastTitle = document.title;
                     titleChangedAt = Date.now();
                 }
-                var rowLeft = this.rowSeconds(taskId, kind);
-                if (rowLeft > 0) sawTimer = true;
-                // The title still belongs to the previous task for a moment.
+                var rowLeft = this.rowSeconds(taskId, kind); // null | 0..300
                 var t = (Date.now() - started > 2500) ? this.titleSeconds(document.title) : null;
-                if (t === 0 && !sawTitle) t = null; // stale "Подтвердить просмотр"
-                if (t !== null) {
-                    sawTimer = true;
-                    if (t > 0) sawTitle = true;   // a real "20 сек" style count
+                if (t === 0 && !sawTitle) t = null; // stale / another task's label
+                if (rowLeft !== null) {
+                    // This task's own row timer exists -> it is the only source
+                    // that cannot belong to another task.
+                    if (rowLeft > 0) sawRow = true;
+                } else if (t !== null && t > 0) {
+                    sawTitle = true;
                 }
 
-                if (!sawTimer) {
+                if (!sawRow && !sawTitle) {
                     // Intermediate / captcha pages: the countdown has not begun, so
                     // the elapsed time proves nothing — just keep waiting.
                     this.showCountdown('⏳ بانتظار بدء العدّاد…');
                 } else {
                     if (!countStart) countStart = Date.now();
-                    var elapsedLeft = Math.max(0,
-                        Math.ceil((sek * 1000 - (Date.now() - countStart)) / 1000));
-                    if (t === 0) left = 0;
+                    if (sawRow && rowLeft !== null) left = rowLeft;
                     else if (t !== null) left = t;
-                    else if (rowLeft > 0) left = rowLeft;
-                    else left = elapsedLeft;
+                    else left = Math.max(0,
+                        Math.ceil((sek * 1000 - (Date.now() - countStart)) / 1000));
                     this.showCountdown('⏳ ' + left + ' ثانية');
                     if (left <= 0) break;
                     // Task tab gone and the title stopped moving: the task is over
@@ -497,7 +515,7 @@
                 await this.sleep(500);
             }
             this.hideCountdown();
-            if (!sawTitle) return 'no-timer';
+            if (!sawRow && !sawTitle) return 'no-timer';
             // Give aviso a moment to register the view before confirming.
             await this.sleep(1500 + Math.floor(Math.random() * 2000));
             return 'counted';
