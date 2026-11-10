@@ -501,6 +501,10 @@
                     // Intermediate / captcha pages: the countdown has not begun, so
                     // the elapsed time proves nothing — just keep waiting.
                     this.showCountdown('⏳ بانتظار بدء العدّاد…');
+                    // Nothing is running at all: a stale CONFIRMING state (the page
+                    // was reloaded mid-task) or a popup that never opened. Waiting
+                    // the full hard cap would stall the bot for minutes.
+                    if (tabCount === 0 && Date.now() - started > 20000) break;
                 } else {
                     if (!countStart) countStart = Date.now();
                     if (sawRow && rowLeft !== null) left = rowLeft;
