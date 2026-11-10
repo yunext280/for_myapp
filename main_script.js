@@ -52,6 +52,7 @@
         busy: false,
         paused: false,
         stuck: false,        // the task tab reported it never reached a real task page
+        attempts: {},        // taskId -> failed starts in THIS run (never persisted)
 
         // ------------------------------------------------------------------ utils
 
@@ -134,8 +135,8 @@
         },
 
         /**
-         * Every section reported "no tasks": stop the loop instead of bouncing
-         * between tasks-surf and tasks-youtube forever.
+         * The run finished: stop the loop and tell the app so its button returns
+         * to ▶ (the script stops itself here, so the app cannot know otherwise).
          */
         finishAll: function () {
             this.running = false;
@@ -149,6 +150,10 @@
             this.save();
             this.showPersistentNotice('🏁 انتهت جميع المهام — تم الإيقاف', '#2ed573');
             console.log('[Bot] all sections are empty — stopped');
+            var b = this.bridge();
+            if (b && typeof b.setAutomationStopped === 'function') {
+                try { b.setAutomationStopped(); } catch (e) {}
+            }
         },
 
         showCountdown: function (text) {
@@ -374,12 +379,20 @@
             return taskId;
         },
 
+        /**
+         * Rows this run may still process.
+         *
+         * `state.done` only holds tasks that were really confirmed. A failed start
+         * is tracked in `attempts` (memory only, max 3 tries) and is NEVER hidden
+         * or marked done — hiding rows is what made real tasks vanish from the page.
+         */
         visibleRows: function () {
             var rows = document.querySelectorAll('.work-serf');
             var out = [];
             for (var i = 0; i < rows.length; i++) {
                 var row = rows[i];
                 if (!row.id || state.done[row.id]) continue;
+                if ((this.attempts[row.id] || 0) >= 3) continue;
                 if (row.offsetParent === null) continue;
                 out.push(row);
             }
@@ -403,8 +416,10 @@
             if (before < 0) return true; // no bridge (desktop testing): assume it worked
 
             // YouTube needs two hops (notice page -> channel page) before the
-            // real tab exists, so wait longer there.
-            var tries = (kind === 'youtube') ? 24 : 14;
+            // real tab exists, so wait longer there. Aviso's start link does an
+            // AJAX round-trip first, so 7s was too short (a slow start looked
+            // like "no tab" and the row got hidden).
+            var tries = (kind === 'youtube') ? 40 : 24;   // 20s / 12s
             for (var i = 0; i < tries; i++) {
                 await this.sleep(500);
                 if (b.getTaskTabCount() > before) return true;
@@ -412,16 +427,19 @@
             return false;
         },
 
-        /** Mark a task as unstartable: hide the row and never retry it. */
+        /**
+         * A start attempt failed: remember it for this run only.
+         *
+         * The row is deliberately NOT hidden and NOT marked as done: aviso may
+         * accept the task on a later try, and hiding it made real tasks disappear
+         * from the list. After 3 failures in one run `visibleRows` ignores it, but
+         * the next run (button ▶ again) starts from zero.
+         */
         skipTask: function (taskId, reason) {
-            state.done[taskId] = true;
-            this.save();
+            this.attempts[taskId] = (this.attempts[taskId] || 0) + 1;
             var row = document.getElementById(taskId);
-            if (row) {
-                row.style.opacity = '0.35';
-                row.style.display = 'none';
-            }
-            this.notify('⚠️ تم تخطي المهمة — ' + reason, '#ff4757');
+            if (row) row.style.opacity = '0.45';
+            this.notify('⚠️ تخطي مؤقت (' + this.attempts[taskId] + '/3) — ' + reason, '#ffa502');
             var b = this.bridge();
             if (b && typeof b.clearTaskContext === 'function') {
                 try { b.clearTaskContext(); } catch (e) {}
@@ -570,27 +588,13 @@
             return out;
         },
 
+        /**
+         * Surf section: start one task.
+         * @returns {'started'|'next'|'section-done'}
+         */
         Surfing: async function () {
             var rows = this.rowsOfKind('serf-link-');
-            if (!rows.length) {
-                state.emptySurf = (state.emptySurf || 0) + 1;
-                if (state.emptySurf >= 2) {
-                    // Both sections verified empty in this idle round -> stop.
-                    if ((state.emptyYt || 0) >= 2) {
-                        this.finishAll();
-                        return 'stopped';
-                    }
-                    this.save();
-                    this.notify('↪️ لا مهام تصفح — الانتقال لمهام يوتيوب', '#1976D2');
-                    location.href = YT_URL;
-                    return 'navigate';
-                }
-                this.save();
-                return 'wait';
-            }
-            // Real work exists: whatever we saw empty earlier is stale.
-            state.emptySurf = 0;
-            state.emptyYt = 0;
+            if (!rows.length) return 'section-done';
 
             var taskId = rows[0].id;
             var startBtn = document.getElementById(taskId.replace('serf-link-', 'start-serf-'));
@@ -616,27 +620,13 @@
             return 'started';
         },
 
+        /**
+         * YouTube section: start one task.
+         * @returns {'started'|'next'|'section-done'}
+         */
         av_ytub: async function () {
             var rows = this.rowsOfKind('ads-link-');
-            if (!rows.length) {
-                state.emptyYt = (state.emptyYt || 0) + 1;
-                if (state.emptyYt >= 2) {
-                    // Both sections verified empty in this idle round -> stop.
-                    if ((state.emptySurf || 0) >= 2) {
-                        this.finishAll();
-                        return 'stopped';
-                    }
-                    this.save();
-                    this.notify('↪️ لا مهام يوتيوب — العودة لمهام التصفح', '#1976D2');
-                    location.href = SURF_URL;
-                    return 'navigate';
-                }
-                this.save();
-                return 'wait';
-            }
-            // Real work exists: whatever we saw empty earlier is stale.
-            state.emptySurf = 0;
-            state.emptyYt = 0;
+            if (!rows.length) return 'section-done';
 
             var taskId = rows[0].id;
             var sek = this.readSek(taskId, 'youtube');
@@ -672,7 +662,7 @@
                 }
             }
 
-            // 'rmove true': the task cannot be started -> drop it.
+            // 'rmove true': the task cannot be started right now -> retry later.
             this.skipTask(taskId, 'لم يُفتح تبويب');
             return 'next';
         },
@@ -730,18 +720,31 @@
                         continue;
                     }
 
-                    var next;
-                    if (url.indexOf('tasks-surf') !== -1) next = await this.Surfing();
-                    else if (url.indexOf('tasks-youtube') !== -1) next = await this.av_ytub();
-                    else {
-                        this.notify('↪️ الانتقال إلى مهام التصفح', '#1976D2');
-                        location.href = SURF_URL;
-                        return;
+                    // One pass: surf first, then YouTube, then stop.
+                    if (url.indexOf('tasks-surf') !== -1) {
+                        var r = await this.Surfing();
+                        if (r === 'section-done') {
+                            this.notify('↪️ انتهت مهام التصفح — الانتقال إلى يوتيوب', '#1976D2');
+                            location.href = YT_URL;
+                            return;
+                        }
+                        if (r === 'next') await this.sleep(1500);
+                        continue;
                     }
-
-                    if (next === 'navigate') return;
-                    if (next === 'stopped') return;
-                    if (next === 'wait') await this.sleep(4000);
+                    if (url.indexOf('tasks-youtube') !== -1) {
+                        var y = await this.av_ytub();
+                        if (y === 'section-done') {
+                            // Nothing left in either section: stop, the button
+                            // returns to ▶ (finishAll tells the app).
+                            this.finishAll();
+                            return;
+                        }
+                        if (y === 'next') await this.sleep(1500);
+                        continue;
+                    }
+                    this.notify('↪️ الانتقال إلى مهام التصفح', '#1976D2');
+                    location.href = SURF_URL;
+                    return;
                 }
             } catch (e) {
                 console.error('[Bot] runAuto crashed:', e);
