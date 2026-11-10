@@ -24,7 +24,7 @@
     var NOTICE_ID = '__bot_notice';
 
     function loadState() {
-        var def = { step: 'IDLE', taskId: null, kind: '', sek: 0, done: {} };
+        var def = { step: 'IDLE', taskId: null, kind: '', sek: 0, done: {}, emptySurf: 0, emptyYt: 0 };
         try {
             var raw = sessionStorage.getItem(STATE_KEY);
             if (!raw) return def;
@@ -35,7 +35,9 @@
                 taskId: s.taskId || null,
                 kind: s.kind || '',
                 sek: s.sek || 0,
-                done: (s.done && typeof s.done === 'object') ? s.done : {}
+                done: (s.done && typeof s.done === 'object') ? s.done : {},
+                emptySurf: s.emptySurf || 0,
+                emptyYt: s.emptyYt || 0
             };
         } catch (e) {
             return def;
@@ -49,7 +51,6 @@
         running: true,
         busy: false,
         paused: false,
-        emptyCount: 0,
 
         // ------------------------------------------------------------------ utils
 
@@ -111,7 +112,42 @@
 
         // Kept for backward compatibility with older callers.
         showPersistentNotification: function (message, color) {
-            this.notify(message, color);
+            return this.showPersistentNotice(message, color);
+        },
+
+        /** A notice that stays on screen (click it to dismiss). */
+        showPersistentNotice: function (message, color) {
+            var old = document.getElementById(NOTICE_ID);
+            if (old) old.remove();
+            var el = document.createElement('div');
+            el.id = NOTICE_ID;
+            el.textContent = message;
+            el.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483647;' +
+                'background:' + (color || '#2ed573') + ';color:#fff;padding:14px 20px;' +
+                'border-radius:10px;font:bold 15px/1.5 sans-serif;max-width:75vw;' +
+                'box-shadow:0 6px 20px rgba(0,0,0,.45);cursor:pointer;';
+            el.title = 'اضغط للإخفاء';
+            el.addEventListener('click', function () { el.remove(); });
+            if (document.body) document.body.appendChild(el);
+            return el;
+        },
+
+        /**
+         * Every section reported "no tasks": stop the loop instead of bouncing
+         * between tasks-surf and tasks-youtube forever.
+         */
+        finishAll: function () {
+            this.running = false;
+            this.hideCountdown();
+            state.step = 'IDLE';
+            state.taskId = null;
+            state.kind = '';
+            state.sek = 0;
+            state.emptySurf = 0;
+            state.emptyYt = 0;
+            this.save();
+            this.showPersistentNotice('🏁 انتهت جميع المهام — تم الإيقاف', '#2ed573');
+            console.log('[Bot] all sections are empty — stopped');
         },
 
         showCountdown: function (text) {
@@ -381,20 +417,38 @@
          * the DOM (visible for surf, display:none for YouTube) even before the task
          * starts. The real signals are the in-row timer (`#timer_serf_<id>` /
          * `#timer_ads_<id>`), the tab title ("20 сек" -> "0 сек" ->
-         * "Подтвердить просмотр") and finally the elapsed time.
+         * "Подтвердить просмотр") and finally the elapsed time — but the elapsed
+         * time is only trusted AFTER the countdown has really started.
+         *
+         * Why: YouTube shows intermediate pages (notice -> channel) and aviso may
+         * show a captcha page; the countdown appears in the tab title only after
+         * they are passed. Confirming on elapsed time there closes a task that
+         * never counted.
+         *
+         * @returns {'counted'|'no-timer'} whether a real countdown was observed.
          */
         watchCountdown: async function (taskId, kind, sek) {
             var started = Date.now();
+            var countStart = 0;   // when the countdown was first seen
             var sawTimer = false;
             var left = sek;
             var lastTitle = document.title;
             var titleChangedAt = Date.now();
+            var hardCap = (sek + 300) * 1000;
             while (this.running) {
-                if (this.paused) { await this.sleep(500); continue; }
+                var b = this.bridge();
+                var tabCount = (b && typeof b.getTaskTabCount === 'function')
+                    ? b.getTaskTabCount() : -1;
+
                 if (this.captchaElement()) {
                     await this.handleCaptchaIfAny();
                     continue;
                 }
+                // A task tab that asked for a captcha and then vanished must not
+                // freeze the engine forever.
+                if (this.paused && tabCount === 0) this.paused = false;
+                if (this.paused) { await this.sleep(500); continue; }
+
                 if (document.title !== lastTitle) {
                     lastTitle = document.title;
                     titleChangedAt = Date.now();
@@ -402,31 +456,39 @@
                 var rowLeft = this.rowSeconds(taskId, kind);
                 if (rowLeft > 0) sawTimer = true;
                 // The title still belongs to the previous task for a moment.
-                var t = (Date.now() - started > 2500) ? this.titleSeconds(document.title, sek) : null;
+                var t = (Date.now() - started > 2500) ? this.titleSeconds(document.title) : null;
                 if (t === 0 && !sawTimer) t = null; // stale "Подтвердить просмотр"
-                var elapsedLeft = Math.max(0, Math.ceil((sek * 1000 - (Date.now() - started)) / 1000));
-                if (t === 0) { left = 0; sawTimer = true; }
-                else if (t !== null) { left = t; sawTimer = true; }
-                else if (rowLeft > 0) { left = rowLeft; }
-                else { left = elapsedLeft; }
-                this.showCountdown('⏳ ' + left + ' ثانية');
-                if (sawTimer && left <= 0) break;
-                // Task tab gone and the title stopped moving: the task is over
-                // (a YouTube intermediate tab may hand the video to a child tab,
-                // so this must not fire while the title is still counting).
-                var b = this.bridge();
-                if (b && typeof b.getTaskTabCount === 'function' &&
-                    b.getTaskTabCount() === 0 &&
-                    Date.now() - titleChangedAt > 15000) break;
-                // No countdown ever appeared: don't hang forever.
-                if (!sawTimer && Date.now() - started > (sek + 25) * 1000) break;
-                // Absolute safety net (frozen title + frozen timer).
-                if (Date.now() - started > (sek + 180) * 1000) break;
+                if (t !== null) sawTimer = true;
+
+                if (!sawTimer) {
+                    // Intermediate / captcha pages: the countdown has not begun, so
+                    // the elapsed time proves nothing — just keep waiting.
+                    this.showCountdown('⏳ بانتظار بدء العدّاد…');
+                } else {
+                    if (!countStart) countStart = Date.now();
+                    var elapsedLeft = Math.max(0,
+                        Math.ceil((sek * 1000 - (Date.now() - countStart)) / 1000));
+                    if (t === 0) left = 0;
+                    else if (t !== null) left = t;
+                    else if (rowLeft > 0) left = rowLeft;
+                    else left = elapsedLeft;
+                    this.showCountdown('⏳ ' + left + ' ثانية');
+                    if (left <= 0) break;
+                    // Task tab gone and the title stopped moving: the task is over
+                    // (a YouTube intermediate tab may hand the video to a child tab,
+                    // so this must not fire while the title is still counting).
+                    if (tabCount === 0 && Date.now() - titleChangedAt > 15000) break;
+                }
+                // Absolute safety net (frozen title + frozen timer, or a countdown
+                // that never starts at all).
+                if (Date.now() - started > hardCap) break;
                 await this.sleep(500);
             }
             this.hideCountdown();
+            if (!sawTimer) return 'no-timer';
             // Give aviso a moment to register the view before confirming.
             await this.sleep(1500 + Math.floor(Math.random() * 2000));
+            return 'counted';
         },
 
         confirmAndFinish: async function (taskId) {
@@ -472,16 +534,24 @@
         Surfing: async function () {
             var rows = this.rowsOfKind('serf-link-');
             if (!rows.length) {
-                this.emptyCount++;
-                if (this.emptyCount >= 2) {
-                    this.emptyCount = 0;
+                state.emptySurf = (state.emptySurf || 0) + 1;
+                if (state.emptySurf >= 2) {
+                    // Both sections verified empty in this idle round -> stop.
+                    if ((state.emptyYt || 0) >= 2) {
+                        this.finishAll();
+                        return 'stopped';
+                    }
+                    this.save();
                     this.notify('↪️ لا مهام تصفح — الانتقال لمهام يوتيوب', '#1976D2');
                     location.href = YT_URL;
                     return 'navigate';
                 }
+                this.save();
                 return 'wait';
             }
-            this.emptyCount = 0;
+            // Real work exists: whatever we saw empty earlier is stale.
+            state.emptySurf = 0;
+            state.emptyYt = 0;
 
             var taskId = rows[0].id;
             var startBtn = document.getElementById(taskId.replace('serf-link-', 'start-serf-'));
@@ -510,16 +580,24 @@
         av_ytub: async function () {
             var rows = this.rowsOfKind('ads-link-');
             if (!rows.length) {
-                this.emptyCount++;
-                if (this.emptyCount >= 2) {
-                    this.emptyCount = 0;
+                state.emptyYt = (state.emptyYt || 0) + 1;
+                if (state.emptyYt >= 2) {
+                    // Both sections verified empty in this idle round -> stop.
+                    if ((state.emptySurf || 0) >= 2) {
+                        this.finishAll();
+                        return 'stopped';
+                    }
+                    this.save();
                     this.notify('↪️ لا مهام يوتيوب — العودة لمهام التصفح', '#1976D2');
                     location.href = SURF_URL;
                     return 'navigate';
                 }
+                this.save();
                 return 'wait';
             }
-            this.emptyCount = 0;
+            // Real work exists: whatever we saw empty earlier is stale.
+            state.emptySurf = 0;
+            state.emptyYt = 0;
 
             var taskId = rows[0].id;
             var sek = this.readSek(taskId, 'youtube');
@@ -588,7 +666,22 @@
                         var taskId = state.taskId;
                         var kind = state.kind;
                         var sek = state.sek || this.readSek(taskId, kind);
-                        await this.watchCountdown(taskId, kind, sek);
+                        var outcome = await this.watchCountdown(taskId, kind, sek);
+                        if (!this.running) return;
+                        if (outcome === 'no-timer') {
+                            // The countdown never started (captcha / intermediate
+                            // page / dead tab): confirming now would credit nothing.
+                            var tb = this.bridge();
+                            if (tb && typeof tb.closeTaskTab === 'function') {
+                                try { tb.closeTaskTab(); } catch (e) {}
+                            }
+                            this.skipTask(taskId, 'لم يبدأ العدّاد');
+                            state.step = 'IDLE';
+                            state.taskId = null;
+                            state.kind = '';
+                            this.save();
+                            continue;
+                        }
                         await this.confirmAndFinish(taskId);
                         continue;
                     }
@@ -608,6 +701,7 @@
                     }
 
                     if (next === 'navigate') return;
+                    if (next === 'stopped') return;
                     if (next === 'wait') await this.sleep(4000);
                 }
             } catch (e) {
