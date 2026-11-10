@@ -525,7 +525,11 @@
                     if (tabCount === 0 && Date.now() - started > 20000) break;
                 } else {
                     if (!countStart) countStart = Date.now();
-                    if (sawRow && rowLeft !== null) left = rowLeft;
+                    // Aviso's row timer stops at "1" (it never reaches 0) and the
+                    // title switches to "Подтвердить просмотр" instead — that title
+                    // is the real end signal once a countdown was seen.
+                    if (t === 0) left = 0;
+                    else if (sawRow && rowLeft !== null) left = rowLeft;
                     else if (t !== null) left = t;
                     else left = Math.max(0,
                         Math.ceil((sek * 1000 - (Date.now() - countStart)) / 1000));
