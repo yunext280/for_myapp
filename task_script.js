@@ -189,6 +189,26 @@
 
         // ------------------------------------------------------------ helpers
 
+        /**
+         * True only when this tab really shows a YouTube video page.
+         * Aviso opens intermediate pages (notice / channel link) before the video,
+         * and a captcha page may appear too — none of them count a view, so the
+         * URL is verified instead of assumed.
+         */
+        isYouTubeVideo: function () {
+            try {
+                var host = String(location.hostname || '').toLowerCase();
+                if (!/(^|\.)(youtube\.com|youtu\.be|youtube-nocookie\.com)$/.test(host)) return false;
+                var path = String(location.pathname || '');
+                if (path.indexOf('/watch') !== -1) return true;
+                if (path.indexOf('/shorts/') !== -1) return true;
+                if (host.indexOf('youtu.be') !== -1 && path.length > 1) return true;
+                return false;
+            } catch (e) {
+                return false;
+            }
+        },
+
         childCount: function () {
             var b = this.bridge();
             if (!b || typeof b.getTaskTabCount !== 'function') return 0;
@@ -247,49 +267,52 @@
         /**
          * YouTube: the popup may first land on an intermediate page with a
          * "continue" button (aviso_bot.py: .btn__notice /
-         * #youtube_views-channel-link), which can open a second tab.
+         * #youtube_views-channel-link), which can open a second tab, and a
+         * captcha page may appear as well.
+         *
+         * The countdown only belongs to a real video page, so this handler keeps
+         * resolving the intermediate pages until the URL is YouTube — it never
+         * pretends the view was counted.
          */
         youtube: async function () {
-            if (location.href.indexOf('youtube.com/watch') !== -1) {
-                await this.watch();
-                return;
-            }
-
-            // Intermediate page: wait for a button or a captcha (10s fast, then 24s slow).
-            var el = await this.waitFor(['.btn__notice', '#youtube_views-channel-link'], 10000);
-            if (!el && !this.captchaElement()) {
-                el = await this.waitFor(['.btn__notice', '#youtube_views-channel-link'], 24000);
-            }
-            if (this.captchaElement()) {
-                await this.handleCaptcha();
-            }
-            if (el) {
-                this.show('↪️ فتح الفيديو…');
-                this.simulateClick(el);
-                await this.sleep(2000);
-            }
-
-            // A child tab may now own the video — wait for it, then close ourselves.
             var started = Date.now();
-            while (Date.now() - started < 120000) {
-                if (location.href.indexOf('youtube.com/watch') !== -1) break;
+            while (Date.now() - started < 180000) {
+                if (this.isYouTubeVideo()) {
+                    await this.watch();
+                    return;
+                }
+                if (this.captchaElement()) {
+                    await this.handleCaptcha();
+                    continue;
+                }
+                // A child tab may own the video now — wait for it to finish.
                 if (this.childCount() > 0) {
                     this.show('⏳ بانتظار تبويب الفيديو…');
-                    while (this.childCount() > 0 && Date.now() - started < 180000) {
+                    var t0 = Date.now();
+                    while (this.childCount() > 0 && Date.now() - t0 < 180000) {
                         await this.sleep(1000);
                     }
                     this.hide();
                     return;
                 }
-                if (!document.querySelector('.btn__notice, #youtube_views-channel-link') &&
-                    Date.now() - started > 15000) {
-                    break;
+                var el = document.querySelector('.btn__notice, #youtube_views-channel-link');
+                if (el) {
+                    this.show('↪️ فتح الفيديو…');
+                    this.simulateClick(el);
+                    await this.sleep(2000);
+                    continue;
                 }
+                this.show('⏳ بانتظار صفحة الفيديو…');
                 await this.sleep(500);
             }
 
-            // If the tab did not navigate to the video, just run the countdown here.
-            await this.watch();
+            // Still not on YouTube: report it so the parent skips the task instead
+            // of confirming a view that never happened.
+            this.post('bot:stuck', { reason: 'not-youtube', url: String(location.href) });
+            this.show('⚠️ لم تُفتح صفحة الفيديو');
+            var t1 = Date.now();
+            while (Date.now() - t1 < 60000) { await this.sleep(1000); }
+            this.hide();
         },
 
         /** Like / subscribe: click the target control, wait, close. */

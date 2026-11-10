@@ -51,6 +51,7 @@
         running: true,
         busy: false,
         paused: false,
+        stuck: false,        // the task tab reported it never reached a real task page
 
         // ------------------------------------------------------------------ utils
 
@@ -374,6 +375,7 @@
          * (aviso_bot.py: `len(driver.window_handles) > 1`).
          */
         startTask: async function (taskId, kind, clickable, sek) {
+            this.stuck = false;
             var b = this.bridge();
             if (b && typeof b.setTaskContext === 'function') {
                 try {
@@ -425,12 +427,16 @@
          * they are passed. Confirming on elapsed time there closes a task that
          * never counted.
          *
+         * The tab title is the proof: a real "N сек" must appear at least once
+         * (task_script.js verifies its own URL for the same reason).
+         *
          * @returns {'counted'|'no-timer'} whether a real countdown was observed.
          */
         watchCountdown: async function (taskId, kind, sek) {
             var started = Date.now();
             var countStart = 0;   // when the countdown was first seen
-            var sawTimer = false;
+            var sawTimer = false; // any countdown (row timer or title)
+            var sawTitle = false; // the Aviso title really counted down
             var left = sek;
             var lastTitle = document.title;
             var titleChangedAt = Date.now();
@@ -448,6 +454,9 @@
                 // freeze the engine forever.
                 if (this.paused && tabCount === 0) this.paused = false;
                 if (this.paused) { await this.sleep(500); continue; }
+                // The task tab says it never reached a real task page
+                // (e.g. YouTube video never opened) — stop waiting.
+                if (this.stuck && !sawTitle) break;
 
                 if (document.title !== lastTitle) {
                     lastTitle = document.title;
@@ -457,8 +466,11 @@
                 if (rowLeft > 0) sawTimer = true;
                 // The title still belongs to the previous task for a moment.
                 var t = (Date.now() - started > 2500) ? this.titleSeconds(document.title) : null;
-                if (t === 0 && !sawTimer) t = null; // stale "Подтвердить просмотр"
-                if (t !== null) sawTimer = true;
+                if (t === 0 && !sawTitle) t = null; // stale "Подтвердить просмотр"
+                if (t !== null) {
+                    sawTimer = true;
+                    if (t > 0) sawTitle = true;   // a real "20 сек" style count
+                }
 
                 if (!sawTimer) {
                     // Intermediate / captcha pages: the countdown has not begun, so
@@ -485,7 +497,7 @@
                 await this.sleep(500);
             }
             this.hideCountdown();
-            if (!sawTimer) return 'no-timer';
+            if (!sawTitle) return 'no-timer';
             // Give aviso a moment to register the view before confirming.
             await this.sleep(1500 + Math.floor(Math.random() * 2000));
             return 'counted';
@@ -722,6 +734,11 @@
         if (!d || typeof d !== 'object') return;
         if (d.type === 'bot:done') {
             engine.runAuto();
+        } else if (d.type === 'bot:stuck') {
+            // The task tab never reached the real task page (YouTube video never
+            // opened): the parent must not confirm a view that never counted.
+            engine.stuck = true;
+            engine.notify('⚠️ لم تُفتح صفحة المهمة — تخطي', '#ff4757');
         } else if (d.type === 'bot:captcha') {
             engine.paused = true;
         } else if (d.type === 'bot:resume') {
