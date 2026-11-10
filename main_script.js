@@ -443,11 +443,14 @@
          * they are passed. Confirming on elapsed time there closes a task that
          * never counted.
          *
-         * The task's own row timer (`#timer_serf_<id>` / `#timer_ads_<id>`) is
-         * the proof: the title may join several tasks ("10 сек • 19 сек •
-         * Подтвердить просмотр"), so a "Подтвердить просмотр" segment there can
-         * belong to another task. The title is only used when the row timer
-         * element does not exist at all.
+         * The task's own row timer (`#timer_serf_<id>`) is the best proof, but
+         * it only counts for surf tasks: for YouTube `#timer_ads_<id>` stays
+         * "0" the whole time (verified live), so the title is the fallback.
+         *
+         * The title may join several tasks ("10 сек • 19 сек • Подтвердить
+         * просмотр"), so a number alone proves nothing — it must be *decreasing*
+         * across two samples, and it must fit this task's duration (sek + 60).
+         * A static number or a bare "Подтвердить просмотр" is never accepted.
          *
          * @returns {'counted'|'no-timer'} whether a real countdown was observed.
          */
@@ -455,7 +458,8 @@
             var started = Date.now();
             var countStart = 0;   // when the countdown was first seen
             var sawRow = false;   // this task's own row timer counted down
-            var sawTitle = false; // the Aviso title counted down (fallback only)
+            var sawTitle = false; // the title really counted down (fallback)
+            var prevTitleSec = null; // last positive title value (decrease check)
             var left = sek;
             var lastTitle = document.title;
             var titleChangedAt = Date.now();
@@ -482,14 +486,15 @@
                     titleChangedAt = Date.now();
                 }
                 var rowLeft = this.rowSeconds(taskId, kind); // null | 0..300
+                if (rowLeft !== null && rowLeft > 0) sawRow = true;
+
+                // Title fallback (YouTube rows never count in the row timer).
                 var t = (Date.now() - started > 2500) ? this.titleSeconds(document.title) : null;
-                if (t === 0 && !sawTitle) t = null; // stale / another task's label
-                if (rowLeft !== null) {
-                    // This task's own row timer exists -> it is the only source
-                    // that cannot belong to another task.
-                    if (rowLeft > 0) sawRow = true;
-                } else if (t !== null && t > 0) {
-                    sawTitle = true;
+                if (!sawRow && t !== null && t > 0 && t <= sek + 60) {
+                    if (prevTitleSec !== null && t < prevTitleSec) sawTitle = true;
+                    prevTitleSec = t;
+                } else if (t === 0) {
+                    prevTitleSec = 0;   // the countdown of some task just ended
                 }
 
                 if (!sawRow && !sawTitle) {
