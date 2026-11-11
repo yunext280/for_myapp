@@ -19,12 +19,17 @@
 
     var SURF_URL = 'https://aviso.bz/tasks-surf';
     var YT_URL = 'https://aviso.bz/tasks-youtube';
+    // The host this script automates, derived from its own URLs (one source of truth).
+    // Used to refuse running on any other site the button may be pressed on.
+    var HOME_HOST = (function () {
+        try { return new URL(SURF_URL).host.toLowerCase(); } catch (e) { return ''; }
+    })();
     var STATE_KEY = '__bot_state_aviso';
     var OVERLAY_ID = '__bot_overlay';
     var NOTICE_ID = '__bot_notice';
 
     function loadState() {
-        var def = { step: 'IDLE', taskId: null, kind: '', sek: 0, done: {}, emptySurf: 0, emptyYt: 0 };
+        var def = { step: 'IDLE', taskId: null, kind: '', sek: 0, phase: '', done: {}, emptySurf: 0, emptyYt: 0 };
         try {
             var raw = sessionStorage.getItem(STATE_KEY);
             if (!raw) return def;
@@ -35,6 +40,7 @@
                 taskId: s.taskId || null,
                 kind: s.kind || '',
                 sek: s.sek || 0,
+                phase: s.phase || '',   // '' = a fresh round, 'surf' | 'yt'
                 done: (s.done && typeof s.done === 'object') ? s.done : {},
                 emptySurf: s.emptySurf || 0,
                 emptyYt: s.emptyYt || 0
@@ -145,6 +151,7 @@
             state.taskId = null;
             state.kind = '';
             state.sek = 0;
+            state.phase = '';        // next ▶ starts a full round from surfing again
             state.emptySurf = 0;
             state.emptyYt = 0;
             this.save();
@@ -673,14 +680,68 @@
 
         // ----------------------------------------------------------------- loop
 
-        checkAuthAndRun: function () {
-            if (location.href.indexOf('/login') !== -1) {
-                var self = this;
-                setTimeout(function () {
-                    self.notify('⚠️ يجب تسجيل الدخول أولاً', '#ff4757');
-                }, 500);
-                return false;
+        /** True when this page belongs to the site this script automates (any subdomain). */
+        onOwnSite: function () {
+            var h = (location.host || '').toLowerCase();
+            return !!HOME_HOST && (h === HOME_HOST || h.endsWith('.' + HOME_HOST));
+        },
+
+        /** Logged out: the login URL, or the login form rendered on any page. */
+        isLoggedOut: function () {
+            if (location.pathname.indexOf('/login') !== -1) return true;
+            if (document.getElementById('login-form')) return true;
+            if (document.getElementById('button-login')) return true;
+            return false;
+        },
+
+        /**
+         * The session ended mid-run: stop, drop the task tab, clear the state and
+         * tell the app so the button returns to ▶. Without the last step the app
+         * keeps the tab in `runningTabs` and the button stays stuck on ■ forever.
+         */
+        abortSessionEnded: function () {
+            this.running = false;
+            this.hideCountdown();
+            state.step = 'IDLE';
+            state.taskId = null;
+            state.kind = '';
+            state.sek = 0;
+            state.phase = '';
+            this.save();
+            var b = this.bridge();
+            if (b && typeof b.closeTaskTab === 'function') {
+                try { b.closeTaskTab(); } catch (e) {}
             }
+            this.showPersistentNotice('🔒 انتهت الجلسة — سجّل الدخول ثم اضغط ▶', '#ff4757');
+            console.log('[Bot] session ended — stopped');
+            if (b && typeof b.setAutomationStopped === 'function') {
+                try { b.setAutomationStopped(); } catch (e) {}
+            }
+        },
+
+        /**
+         * The app injects this script into whatever tab ▶ was pressed on, so the
+         * script itself must refuse to run anywhere but its own site. The button
+         * is not tied to the page URL: the script is the single source of truth.
+         */
+        requireOwnSite: function () {
+            if (this.onOwnSite()) return true;
+            this.running = false;
+            this.hideCountdown();
+            this.showPersistentNotice('⚠️ يجب الانتقال إلى موقع ' + HOME_HOST +
+                ' — افتحه من القائمة ثم اضغط ▶', '#ff4757');
+            console.log('[Bot] wrong site: ' + location.host + ' (expected ' + HOME_HOST + ')');
+            var b = this.bridge();
+            if (b && typeof b.setAutomationStopped === 'function') {
+                try { b.setAutomationStopped(); } catch (e) {}
+            }
+            return false;
+        },
+
+        /** Gate at the start of every run and every loop turn. */
+        checkAuthAndRun: function () {
+            if (!this.requireOwnSite()) return false;
+            if (this.isLoggedOut()) { this.abortSessionEnded(); return false; }
             return true;
         },
 
@@ -691,9 +752,24 @@
                 if (!this.checkAuthAndRun()) return;
                 for (var guard = 0; guard < 2000; guard++) {
                     if (!this.running) return;
+                    if (this.isLoggedOut()) { this.abortSessionEnded(); return; }
 
                     var url = location.href;
-                    if (url.indexOf('/login') !== -1) { this.checkAuthAndRun(); return; }
+                    if (!this.onOwnSite()) { this.requireOwnSite(); return; }
+
+                    // A round always starts at surfing, whatever page ▶ was pressed on
+                    // (after a finished run the tab is left on tasks-youtube, and the
+                    // YouTube section is empty then — without this the bot stopped
+                    // immediately instead of opening the surf section).
+                    if (!state.phase) {
+                        state.phase = 'surf';
+                        this.save();
+                        if (url.indexOf('tasks-surf') === -1) {
+                            this.notify('↪️ بدء الجولة من مهام التصفح', '#1976D2');
+                            location.href = SURF_URL;
+                            return;
+                        }
+                    }
 
                     if (state.step === 'CONFIRMING' && state.taskId) {
                         var taskId = state.taskId;
@@ -716,6 +792,9 @@
                             continue;
                         }
                         await this.confirmAndFinish(taskId);
+                        // The server may have logged the session out while the task
+                        // was being confirmed: stop here instead of looping on /login.
+                        if (this.isLoggedOut()) { this.abortSessionEnded(); return; }
                         continue;
                     }
 
@@ -728,6 +807,8 @@
                     if (url.indexOf('tasks-surf') !== -1) {
                         var r = await this.Surfing();
                         if (r === 'section-done') {
+                            state.phase = 'yt';
+                            this.save();
                             this.notify('↪️ انتهت مهام التصفح — الانتقال إلى يوتيوب', '#1976D2');
                             location.href = YT_URL;
                             return;
