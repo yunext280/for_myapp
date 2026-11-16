@@ -90,6 +90,19 @@
             try { return b.getCaptchaKey() || ''; } catch (e) { return ''; }
         },
 
+        /** Beep + notification so the paused task is noticed outside the app. */
+        alertCaptcha: function (message) {
+            var b = this.bridge();
+            if (!b || typeof b.alertCaptcha !== 'function') return;
+            try { b.alertCaptcha(message || ''); } catch (e) {}
+        },
+
+        clearCaptchaAlert: function () {
+            var b = this.bridge();
+            if (!b || typeof b.clearCaptchaAlert !== 'function') return;
+            try { b.clearCaptchaAlert(); } catch (e) {}
+        },
+
         solveCaptcha: async function (sitekey, pageUrl) {
             var key = this.getCaptchaKey();
             if (!key || !sitekey) return null;
@@ -171,18 +184,28 @@
             if (!el) return false;
             this.post('bot:captcha');
             this.show('🧩 جاري حل الكابتشا…');
+            this.alertCaptcha('مهمة متوقفة: حل الكابتشا — بعد 5 دقائق سيتوقف البوت');
             var token = await this.solveCaptcha(el.getAttribute('data-sitekey'), location.href);
             if (!token) {
-                this.show('🧩 حلّها يدويًا…');
+                this.show('🧩 حلّها يدويًا خلال 5 دقائق…');
+                var solved = false;
                 for (var i = 0; i < 600; i++) { // wait up to 5 min for a manual solve
                     await this.sleep(500);
-                    if (!this.captchaElement()) break;
+                    if (!this.captchaElement()) { solved = true; break; }
+                }
+                this.clearCaptchaAlert();
+                if (!solved) {
+                    // Tell the parent to stop the whole run: an unsolved captcha
+                    // would only burn the timer and credit nothing.
+                    this.post('bot:captcha-failed');
+                    return true;
                 }
                 this.post('bot:resume');
                 return true;
             }
             this.injectCaptchaToken(token);
             await this.sleep(2500);
+            this.clearCaptchaAlert();
             this.post('bot:resume');
             return true;
         },

@@ -284,6 +284,20 @@
             try { return b.getCaptchaKey() || ''; } catch (e) { return ''; }
         },
 
+        /** Beep + notification, so the user notices the pause even in another app. */
+        alertCaptcha: function (message) {
+            var b = this.bridge();
+            if (!b || typeof b.alertCaptcha !== 'function') return;
+            try { b.alertCaptcha(message || ''); } catch (e) {}
+        },
+
+        /** The captcha is gone (solved, or the run stopped): drop the alert. */
+        clearCaptchaAlert: function () {
+            var b = this.bridge();
+            if (!b || typeof b.clearCaptchaAlert !== 'function') return;
+            try { b.clearCaptchaAlert(); } catch (e) {}
+        },
+
         solveCaptcha: async function (sitekey, pageUrl) {
             var key = this.getCaptchaKey();
             if (!key || !sitekey) return null;
@@ -359,15 +373,21 @@
             if (!el) return false;
             this.paused = true;
             this.showCountdown('🧩 جاري حل الكابتشا…');
+            this.alertCaptcha('افتح التطبيق وحل الكابتشا — بعد 5 دقائق سيتوقف البوت');
             var token = await this.solveCaptcha(el.getAttribute('data-sitekey'), location.href);
             if (!token) {
-                this.notify('🧩 تعذّر الحل التلقائي — حلّها يدويًا ثم سيكمل تلقائيًا', '#ff4757');
+                this.notify('🧩 تعذّر الحل التلقائي — حلّها يدويًا خلال 5 دقائق', '#ff4757');
+                var solved = false;
                 for (var i = 0; i < 600; i++) {
                     await this.sleep(500);
-                    if (!this.captchaElement()) break;
+                    if (!this.captchaElement()) { solved = true; break; }
                 }
                 this.paused = false;
                 this.hideCountdown();
+                // An unsolved captcha must stop the run: continuing would confirm
+                // tasks the site never credited (no token reached the server).
+                if (!solved) { this.stopForCaptcha(); return true; }
+                this.clearCaptchaAlert();
                 return true;
             }
             this.notify('✅ تم حل الكابتشا', '#2ed573');
@@ -375,7 +395,34 @@
             await this.sleep(2500);
             this.paused = false;
             this.hideCountdown();
+            this.clearCaptchaAlert();
             return true;
+        },
+
+        /**
+         * The captcha was not solved within the 5-minute window: stop everything and
+         * say so — same clean stop as an ended session, so ▶ comes back.
+         */
+        stopForCaptcha: function () {
+            this.running = false;
+            this.paused = false;
+            this.hideCountdown();
+            state.step = 'IDLE';
+            state.taskId = null;
+            state.kind = '';
+            state.sek = 0;
+            state.phase = '';
+            this.save();
+            var b = this.bridge();
+            if (b && typeof b.closeTaskTab === 'function') {
+                try { b.closeTaskTab(); } catch (e) {}
+            }
+            this.clearCaptchaAlert();
+            this.showPersistentNotice('🔒 الكابتشا لم تُحل خلال 5 دقائق — توقف البوت', '#ff4757');
+            console.log('[Bot] captcha unsolved — stopped');
+            if (b && typeof b.setAutomationStopped === 'function') {
+                try { b.setAutomationStopped(); } catch (e) {}
+            }
         },
 
         // ----------------------------------------------------------- task flow
@@ -856,8 +903,13 @@
             engine.notify('⚠️ لم تُفتح صفحة المهمة — تخطي', '#ff4757');
         } else if (d.type === 'bot:captcha') {
             engine.paused = true;
+        } else if (d.type === 'bot:captcha-failed') {
+            // A task tab waited 5 minutes for a manual solve and got none: the
+            // whole run stops instead of confirming an uncredited task.
+            engine.stopForCaptcha();
         } else if (d.type === 'bot:resume') {
             engine.paused = false;
+            engine.clearCaptchaAlert();
         }
     });
 
