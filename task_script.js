@@ -183,11 +183,11 @@
             var el = this.captchaElement();
             if (!el) return false;
             this.post('bot:captcha');
-            this.show('🧩 جاري حل الكابتشا…');
-            this.alertCaptcha('مهمة متوقفة: حل الكابتشا — بعد 5 دقائق سيتوقف البوت');
+            this.hide();
+            this.alertCaptcha('Task paused: solve the captcha — the bot stops after 5 minutes');
             var token = await this.solveCaptcha(el.getAttribute('data-sitekey'), location.href);
             if (!token) {
-                this.show('🧩 حلّها يدويًا خلال 5 دقائق…');
+                this.hide();
                 var solved = false;
                 for (var i = 0; i < 600; i++) { // wait up to 5 min for a manual solve
                     await this.sleep(500);
@@ -262,7 +262,7 @@
                     continue;
                 }
                 var left = Math.max(0, Math.ceil((sek * 1000 - (Date.now() - started)) / 1000));
-                this.show(left > 0 ? ('⏳ ' + left + ' ثانية') : '⏳ بانتظار تأكيد المهمة…');
+                if (left > 0) this.show('⏳ ' + left); else this.hide();
                 this.post('bot:tick', { remaining: left });
                 if (left <= 0) break;
                 await this.sleep(500);
@@ -279,7 +279,7 @@
             // bridge when the task is really finished. Closing ourselves early
             // made the parent confirm before the view was counted.
             this.post('bot:done');
-            this.show('⏳ بانتظار إغلاق التبويب…');
+            this.hide();
             var t0 = Date.now();
             while (Date.now() - t0 < 120000) {
                 await this.sleep(1000);
@@ -310,7 +310,7 @@
                 }
                 // A child tab may own the video now — wait for it to finish.
                 if (this.childCount() > 0) {
-                    this.show('⏳ بانتظار تبويب الفيديو…');
+                    this.hide();
                     var t0 = Date.now();
                     while (this.childCount() > 0 && Date.now() - t0 < 180000) {
                         await this.sleep(1000);
@@ -320,19 +320,19 @@
                 }
                 var el = document.querySelector('.btn__notice, #youtube_views-channel-link');
                 if (el) {
-                    this.show('↪️ فتح الفيديو…');
+                    this.hide();
                     this.simulateClick(el);
                     await this.sleep(2000);
                     continue;
                 }
-                this.show('⏳ بانتظار صفحة الفيديو…');
+                this.hide();
                 await this.sleep(500);
             }
 
             // Still not on YouTube: report it so the parent skips the task instead
             // of confirming a view that never happened.
             this.post('bot:stuck', { reason: 'not-youtube', url: String(location.href) });
-            this.show('⚠️ لم تُفتح صفحة الفيديو');
+            this.hide();
             var t1 = Date.now();
             while (Date.now() - t1 < 60000) { await this.sleep(1000); }
             this.hide();
@@ -342,7 +342,7 @@
         click: async function (selectors) {
             var el = await this.waitFor(selectors, 20000);
             if (el) {
-                this.show('👆 تنفيذ المهمة…');
+                this.hide();
                 this.simulateClick(el);
                 await this.sleep(1500);
             }

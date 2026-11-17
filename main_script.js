@@ -26,6 +26,8 @@
     })();
     var STATE_KEY = '__bot_state_aviso';
     var OVERLAY_ID = '__bot_overlay';
+    // Reserved: notice cards are disabled (see notify). Kept so the id stays
+    // unique if they are ever restored.
     var NOTICE_ID = '__bot_notice';
 
     function loadState() {
@@ -104,18 +106,14 @@
             }
         },
 
+        /**
+         * Notices are DISABLED on purpose: the page must stay clean, so the bot
+         * never draws cards, banners or tooltips over it. The function is kept as
+         * a no-op (same signature) so every call site keeps working, and the text
+         * only goes to the console where a developer can read it.
+         */
         notify: function (message, color) {
-            var old = document.getElementById(NOTICE_ID);
-            if (old) old.remove();
-            var el = document.createElement('div');
-            el.id = NOTICE_ID;
-            el.textContent = message;
-            el.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483647;' +
-                'background:' + (color || '#1976D2') + ';color:#fff;padding:12px 18px;' +
-                'border-radius:8px;font:bold 14px/1.4 sans-serif;max-width:70vw;' +
-                'box-shadow:0 4px 14px rgba(0,0,0,.35);pointer-events:none;';
-            document.body.appendChild(el);
-            setTimeout(function () { if (el.parentNode) el.remove(); }, 4000);
+            console.log('[Bot] ' + (message || ''));
         },
 
         // Kept for backward compatibility with older callers.
@@ -123,21 +121,10 @@
             return this.showPersistentNotice(message, color);
         },
 
-        /** A notice that stays on screen (click it to dismiss). */
+        /** Persistent notices are disabled too (see notify) — nothing is drawn. */
         showPersistentNotice: function (message, color) {
-            var old = document.getElementById(NOTICE_ID);
-            if (old) old.remove();
-            var el = document.createElement('div');
-            el.id = NOTICE_ID;
-            el.textContent = message;
-            el.style.cssText = 'position:fixed;top:16px;right:16px;z-index:2147483647;' +
-                'background:' + (color || '#2ed573') + ';color:#fff;padding:14px 20px;' +
-                'border-radius:10px;font:bold 15px/1.5 sans-serif;max-width:75vw;' +
-                'box-shadow:0 6px 20px rgba(0,0,0,.45);cursor:pointer;';
-            el.title = 'اضغط للإخفاء';
-            el.addEventListener('click', function () { el.remove(); });
-            if (document.body) document.body.appendChild(el);
-            return el;
+            console.log('[Bot] ' + (message || ''));
+            return null;
         },
 
         /**
@@ -155,7 +142,6 @@
             state.emptySurf = 0;
             state.emptyYt = 0;
             this.save();
-            this.showPersistentNotice('🏁 انتهت جميع المهام — تم الإيقاف', '#2ed573');
             console.log('[Bot] all sections are empty — stopped');
             var b = this.bridge();
             if (b && typeof b.setAutomationStopped === 'function') {
@@ -372,11 +358,12 @@
             var el = this.captchaElement();
             if (!el) return false;
             this.paused = true;
-            this.showCountdown('🧩 جاري حل الكابتشا…');
-            this.alertCaptcha('افتح التطبيق وحل الكابتشا — بعد 5 دقائق سيتوقف البوت');
+            this.hideCountdown();
+            this.alertCaptcha('Captcha required — open the app and solve it');
+            console.log('[Bot] captcha detected — auto-solving');
             var token = await this.solveCaptcha(el.getAttribute('data-sitekey'), location.href);
             if (!token) {
-                this.notify('🧩 تعذّر الحل التلقائي — حلّها يدويًا خلال 5 دقائق', '#ff4757');
+                console.log('[Bot] auto-solve failed — waiting up to 5 minutes for a manual solve');
                 var solved = false;
                 for (var i = 0; i < 600; i++) {
                     await this.sleep(500);
@@ -390,7 +377,7 @@
                 this.clearCaptchaAlert();
                 return true;
             }
-            this.notify('✅ تم حل الكابتشا', '#2ed573');
+            console.log('[Bot] captcha solved');
             this.injectCaptchaToken(token);
             await this.sleep(2500);
             this.paused = false;
@@ -418,7 +405,6 @@
                 try { b.closeTaskTab(); } catch (e) {}
             }
             this.clearCaptchaAlert();
-            this.showPersistentNotice('🔒 الكابتشا لم تُحل خلال 5 دقائق — توقف البوت', '#ff4757');
             console.log('[Bot] captcha unsolved — stopped');
             if (b && typeof b.setAutomationStopped === 'function') {
                 try { b.setAutomationStopped(); } catch (e) {}
@@ -493,7 +479,7 @@
             this.attempts[taskId] = (this.attempts[taskId] || 0) + 1;
             var row = document.getElementById(taskId);
             if (row) row.style.opacity = '0.45';
-            this.notify('⚠️ تخطي مؤقت (' + this.attempts[taskId] + '/3) — ' + reason, '#ffa502');
+            this.notify('temporary skip (' + this.attempts[taskId] + '/3) — ' + reason, '#ffa502');
             var b = this.bridge();
             if (b && typeof b.clearTaskContext === 'function') {
                 try { b.clearTaskContext(); } catch (e) {}
@@ -572,7 +558,7 @@
                 if (!sawRow && !sawTitle) {
                     // Intermediate / captcha pages: the countdown has not begun, so
                     // the elapsed time proves nothing — just keep waiting.
-                    this.showCountdown('⏳ بانتظار بدء العدّاد…');
+                    this.hideCountdown();
                     // Nothing is running at all: a stale CONFIRMING state (the page
                     // was reloaded mid-task) or a popup that never opened. Waiting
                     // the full hard cap would stall the bot for minutes.
@@ -587,7 +573,7 @@
                     else if (t !== null) left = t;
                     else left = Math.max(0,
                         Math.ceil((sek * 1000 - (Date.now() - countStart)) / 1000));
-                    this.showCountdown('⏳ ' + left + ' ثانية');
+                    this.showCountdown('⏳ ' + left);
                     if (left <= 0) break;
                     // Task tab gone and the title stopped moving: the task is over
                     // (a YouTube intermediate tab may hand the video to a child tab,
@@ -616,7 +602,7 @@
             var btn = document.getElementById(confirmId);
             if (btn) {
                 this.simulateClick(btn);
-                this.notify('✅ تم تأكيد المهمة', '#2ed573');
+                console.log('[Bot] task confirmed: ' + taskId);
                 // Wait for aviso to clear its "Подтвердить просмотр" title, so the
                 // next task does not start with a stale countdown.
                 for (var i = 0; i < 16; i++) {
@@ -625,7 +611,7 @@
                 }
                 await this.sleep(800);
             } else {
-                this.notify('⚠️ زر التأكيد غير متوفر — متابعة', '#ffa502');
+                console.log('[Bot] confirm button missing — continuing: ' + taskId);
             }
             state.done[taskId] = true;
             state.step = 'IDLE';
@@ -658,15 +644,15 @@
             var startBtn = document.getElementById(taskId.replace('serf-link-', 'start-serf-'));
             var clickable = startBtn ? startBtn.querySelector('a.start-surfing-btn') : null;
             if (!clickable) {
-                this.skipTask(taskId, 'زر البدء غير متاح');
+                this.skipTask(taskId, 'start button not available');
                 return 'next';
             }
 
             var sek = this.readSek(taskId, 'surf');
-            this.notify('▶️ مهمة تصفح ' + taskId + ' — ' + sek + 'ث', '#1976D2');
+            this.notify('surf task ' + taskId + ' — ' + sek + 's', '#1976D2');
             var opened = await this.startTask(taskId, 'surf', clickable, sek);
             if (!opened) {
-                this.skipTask(taskId, 'لم يُفتح تبويب');
+                this.skipTask(taskId, 'no tab was opened');
                 return 'next';
             }
 
@@ -692,7 +678,7 @@
             var clickable = startBtn || null;
 
             if (clickable) {
-                this.notify('▶️ مهمة يوتيوب ' + taskId + ' — ' + sek + 'ث', '#1976D2');
+                this.notify('youtube task ' + taskId + ' — ' + sek + 's', '#1976D2');
                 var opened = await this.startTask(taskId, 'youtube', clickable, sek);
                 if (opened) {
                     state.step = 'CONFIRMING';
@@ -707,7 +693,7 @@
             // Fallback start link (aviso_bot.py line 381).
             var alt = document.querySelector('#' + taskId + ' > tbody > tr > td:nth-child(3) > div > a');
             if (alt) {
-                this.notify('🔁 محاولة رابط بديل للمهمة ' + taskId, '#ffa502');
+                this.notify('trying an alternate link for task ' + taskId, '#ffa502');
                 var openedAlt = await this.startTask(taskId, 'youtube', alt, sek);
                 await this.sleep(1500);
                 if (openedAlt) {
@@ -721,7 +707,7 @@
             }
 
             // 'rmove true': the task cannot be started right now -> retry later.
-            this.skipTask(taskId, 'لم يُفتح تبويب');
+            this.skipTask(taskId, 'no tab was opened');
             return 'next';
         },
 
@@ -759,7 +745,6 @@
             if (b && typeof b.closeTaskTab === 'function') {
                 try { b.closeTaskTab(); } catch (e) {}
             }
-            this.showPersistentNotice('🔒 انتهت الجلسة — سجّل الدخول ثم اضغط ▶', '#ff4757');
             console.log('[Bot] session ended — stopped');
             if (b && typeof b.setAutomationStopped === 'function') {
                 try { b.setAutomationStopped(); } catch (e) {}
@@ -775,8 +760,6 @@
             if (this.onOwnSite()) return true;
             this.running = false;
             this.hideCountdown();
-            this.showPersistentNotice('⚠️ يجب الانتقال إلى موقع ' + HOME_HOST +
-                ' — افتحه من القائمة ثم اضغط ▶', '#ff4757');
             console.log('[Bot] wrong site: ' + location.host + ' (expected ' + HOME_HOST + ')');
             var b = this.bridge();
             if (b && typeof b.setAutomationStopped === 'function') {
@@ -812,7 +795,7 @@
                         state.phase = 'surf';
                         this.save();
                         if (url.indexOf('tasks-surf') === -1) {
-                            this.notify('↪️ بدء الجولة من مهام التصفح', '#1976D2');
+                            this.notify('round starts at the surf section', '#1976D2');
                             location.href = SURF_URL;
                             return;
                         }
@@ -831,7 +814,7 @@
                             if (tb && typeof tb.closeTaskTab === 'function') {
                                 try { tb.closeTaskTab(); } catch (e) {}
                             }
-                            this.skipTask(taskId, 'لم يبدأ العدّاد');
+                            this.skipTask(taskId, 'the countdown never started');
                             state.step = 'IDLE';
                             state.taskId = null;
                             state.kind = '';
@@ -856,7 +839,7 @@
                         if (r === 'section-done') {
                             state.phase = 'yt';
                             this.save();
-                            this.notify('↪️ انتهت مهام التصفح — الانتقال إلى يوتيوب', '#1976D2');
+                            this.notify('surf section done — moving to YouTube', '#1976D2');
                             location.href = YT_URL;
                             return;
                         }
@@ -874,7 +857,7 @@
                         if (y === 'next') await this.sleep(1500);
                         continue;
                     }
-                    this.notify('↪️ الانتقال إلى مهام التصفح', '#1976D2');
+                    this.notify('moving to the surf section', '#1976D2');
                     location.href = SURF_URL;
                     return;
                 }
@@ -900,7 +883,7 @@
             // The task tab never reached the real task page (YouTube video never
             // opened): the parent must not confirm a view that never counted.
             engine.stuck = true;
-            engine.notify('⚠️ لم تُفتح صفحة المهمة — تخطي', '#ff4757');
+            console.log('[Bot] task page never opened — skipping');
         } else if (d.type === 'bot:captcha') {
             engine.paused = true;
         } else if (d.type === 'bot:captcha-failed') {
